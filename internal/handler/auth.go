@@ -1,24 +1,27 @@
 package handler
 
 import (
-	"database/sql"
+	"context"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/lieutenant/tabmaster/internal/auth"
-	"github.com/lieutenant/tabmaster/internal/middleware"
-	"github.com/lieutenant/tabmaster/internal/model"
+	"github.com/tabslate/server/billing"
+	"github.com/tabslate/server/db"
+	"github.com/tabslate/server/internal/auth"
+	"github.com/tabslate/server/internal/middleware"
+	"github.com/tabslate/server/internal/model"
 )
 
 type AuthHandler struct {
-	db     *sql.DB
-	secret string
+	db      *db.DB
+	secret  string
+	billing billing.Provider
 }
 
-func NewAuthHandler(db *sql.DB, secret string) *AuthHandler {
-	return &AuthHandler{db: db, secret: secret}
+func NewAuthHandler(d *db.DB, secret string, bp billing.Provider) *AuthHandler {
+	return &AuthHandler{db: d, secret: secret, billing: bp}
 }
 
 // POST /auth/register
@@ -29,10 +32,10 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	// Check email uniqueness
-	var exists int
-	h.db.QueryRow(`SELECT COUNT(*) FROM users WHERE email = ?`, req.Email).Scan(&exists)
-	if exists > 0 {
+	ctx := c.Request.Context()
+	var count int
+	h.db.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE email = $1`, req.Email).Scan(&count)
+	if count > 0 {
 		c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
 		return
 	}
@@ -46,26 +49,24 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	userID := uuid.NewString()
 	now := time.Now().Unix()
 
-	_, err = h.db.Exec(
-		`INSERT INTO users (id, name, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+	if _, err := h.db.Exec(ctx,
+		`INSERT INTO users (id, name, email, password_hash, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6)`,
 		userID, req.Name, req.Email, hash, now, now,
-	)
-	if err != nil {
+	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
 		return
 	}
 
-	// Create default free subscription
-	h.db.Exec(
-		`INSERT INTO subscriptions (id, user_id, plan, status, created_at, updated_at) VALUES (?, ?, 'free', 'active', ?, ?)`,
+	h.db.Exec(ctx,
+		`INSERT INTO subscriptions (id, user_id, plan, status, created_at, updated_at) VALUES ($1,$2,'free','active',$3,$4)`,
+		uuid.NewString(), userID, now, now,
+	)
+	h.db.Exec(ctx,
+		`INSERT INTO workspaces (id, user_id, name, position, created_at, updated_at) VALUES ($1,$2,'My Workspace',0,$3,$4)`,
 		uuid.NewString(), userID, now, now,
 	)
 
-	// Create default workspace for free users
-	h.db.Exec(
-		`INSERT INTO workspaces (id, user_id, name, position, created_at, updated_at) VALUES (?, ?, 'My Workspace', 0, ?, ?)`,
-		uuid.NewString(), userID, now, now,
-	)
+	go h.billing.OnUserCreated(ctx, billing.UserInfo{ID: userID, Name: req.Name, Email: req.Email})
 
 	user := &model.User{ID: userID, Name: req.Name, Email: req.Email, CreatedAt: now, UpdatedAt: now}
 	resp, err := h.issueTokens(user)
@@ -84,9 +85,10 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
 	var user model.User
-	err := h.db.QueryRow(
-		`SELECT id, name, email, password_hash, created_at, updated_at FROM users WHERE email = ?`,
+	err := h.db.QueryRow(ctx,
+		`SELECT id, name, email, password_hash, created_at, updated_at FROM users WHERE email = $1`,
 		req.Email,
 	).Scan(&user.ID, &user.Name, &user.Email, &user.PasswordHash, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
@@ -115,11 +117,13 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
 	tokenHash := auth.HashRefreshToken(req.RefreshToken)
+
 	var userID string
 	var expiresAt int64
-	err := h.db.QueryRow(
-		`SELECT user_id, expires_at FROM refresh_tokens WHERE token_hash = ?`,
+	err := h.db.QueryRow(ctx,
+		`SELECT user_id, expires_at FROM refresh_tokens WHERE token_hash = $1`,
 		tokenHash,
 	).Scan(&userID, &expiresAt)
 	if err != nil || time.Now().Unix() > expiresAt {
@@ -127,12 +131,11 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		return
 	}
 
-	// Rotate: delete old, issue new
-	h.db.Exec(`DELETE FROM refresh_tokens WHERE token_hash = ?`, tokenHash)
+	h.db.Exec(ctx, `DELETE FROM refresh_tokens WHERE token_hash = $1`, tokenHash)
 
 	var user model.User
-	h.db.QueryRow(
-		`SELECT id, name, email, created_at, updated_at FROM users WHERE id = ?`, userID,
+	h.db.QueryRow(ctx,
+		`SELECT id, name, email, created_at, updated_at FROM users WHERE id = $1`, userID,
 	).Scan(&user.ID, &user.Name, &user.Email, &user.CreatedAt, &user.UpdatedAt)
 
 	resp, err := h.issueTokens(&user)
@@ -148,29 +151,36 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	var req model.RefreshRequest
 	if err := c.ShouldBindJSON(&req); err == nil {
 		tokenHash := auth.HashRefreshToken(req.RefreshToken)
-		h.db.Exec(`DELETE FROM refresh_tokens WHERE token_hash = ?`, tokenHash)
+		h.db.Exec(c.Request.Context(), `DELETE FROM refresh_tokens WHERE token_hash = $1`, tokenHash)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // GET /auth/me
 func (h *AuthHandler) Me(c *gin.Context) {
+	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
+
 	var user model.User
-	err := h.db.QueryRow(
-		`SELECT id, name, email, created_at, updated_at FROM users WHERE id = ?`, userID,
+	err := h.db.QueryRow(ctx,
+		`SELECT id, name, email, created_at, updated_at FROM users WHERE id = $1`, userID,
 	).Scan(&user.ID, &user.Name, &user.Email, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
 	}
 
-	var sub model.Subscription
-	h.db.QueryRow(
-		`SELECT plan, status, expires_at FROM subscriptions WHERE user_id = ?`, userID,
-	).Scan(&sub.Plan, &sub.Status, &sub.ExpiresAt)
-	if sub.Plan == "" {
-		sub.Plan = model.PlanFree
+	sub, err := h.billing.GetSubscription(ctx, userID)
+	if err != nil {
+		var plan, status string
+		h.db.QueryRow(ctx,
+			`SELECT plan, status FROM subscriptions WHERE user_id = $1`, userID,
+		).Scan(&plan, &status)
+		if plan == "" {
+			plan = string(model.PlanFree)
+		}
+		c.JSON(http.StatusOK, gin.H{"user": user, "subscription": gin.H{"plan": plan, "status": status}})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"user": user, "subscription": sub})
@@ -188,11 +198,10 @@ func (h *AuthHandler) issueTokens(user *model.User) (*model.AuthResponse, error)
 	}
 
 	expiresAt := time.Now().Add(auth.RefreshTokenTTL).Unix()
-	_, err = h.db.Exec(
-		`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)`,
+	if _, err := h.db.Exec(context.Background(),
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES ($1,$2,$3,$4)`,
 		uuid.NewString(), user.ID, hashRefresh, expiresAt,
-	)
-	if err != nil {
+	); err != nil {
 		return nil, err
 	}
 

@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/lieutenant/tabmaster/internal/auth"
+	"github.com/tabslate/server/internal/auth"
 )
 
 const UserIDKey = "userID"
