@@ -1,0 +1,142 @@
+// Package mailer provides email delivery via SMTP or Resend API.
+package mailer
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/smtp"
+	"time"
+)
+
+// Mailer sends transactional emails.
+// If provider is empty, sending is a no-op (useful for dev / self-hosted without email).
+type Mailer struct {
+	provider string // "smtp", "resend", or "" (disabled)
+
+	// SMTP
+	smtpHost string
+	smtpPort string
+	smtpUser string
+	smtpPass string
+	smtpFrom string
+
+	// Resend
+	resendAPIKey string
+	resendFrom   string
+
+	client *http.Client
+}
+
+// Config holds the mail provider configuration.
+type Config struct {
+	Provider string
+
+	// SMTP
+	SMTPHost     string
+	SMTPPort     string
+	SMTPUser     string
+	SMTPPassword string
+	SMTPFrom     string
+
+	// Resend
+	ResendAPIKey string
+	ResendFrom   string
+}
+
+// New creates a Mailer from the given config.
+// If Config.Provider is empty, the mailer is disabled (Send is a no-op).
+func New(cfg Config) *Mailer {
+	return &Mailer{
+		provider:     cfg.Provider,
+		smtpHost:     cfg.SMTPHost,
+		smtpPort:     cfg.SMTPPort,
+		smtpUser:     cfg.SMTPUser,
+		smtpPass:     cfg.SMTPPassword,
+		smtpFrom:     cfg.SMTPFrom,
+		resendAPIKey: cfg.ResendAPIKey,
+		resendFrom:   cfg.ResendFrom,
+		client: &http.Client{
+			Timeout: 15 * time.Second,
+		},
+	}
+}
+
+// Enabled reports whether the mailer has a configured provider.
+func (m *Mailer) Enabled() bool {
+	return m.provider != ""
+}
+
+// Send delivers an email. It is a no-op if no provider is configured.
+func (m *Mailer) Send(ctx context.Context, to, subject, htmlBody string) error {
+	switch m.provider {
+	case "smtp":
+		return m.sendSMTP(to, subject, htmlBody)
+	case "resend":
+		return m.sendResend(ctx, to, subject, htmlBody)
+	default:
+		// Disabled — silently succeed so that dev environments work without email.
+		return nil
+	}
+}
+
+func (m *Mailer) sendSMTP(to, subject, htmlBody string) error {
+	addr := m.smtpHost + ":" + m.smtpPort
+
+	msg := "From: " + m.smtpFrom + "\r\n" +
+		"To: " + to + "\r\n" +
+		"Subject: " + subject + "\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: text/html; charset=\"UTF-8\"\r\n" +
+		"\r\n" +
+		htmlBody
+
+	var auth smtp.Auth
+	if m.smtpUser != "" {
+		auth = smtp.PlainAuth("", m.smtpUser, m.smtpPass, m.smtpHost)
+	}
+
+	if err := smtp.SendMail(addr, auth, m.smtpFrom, []string{to}, []byte(msg)); err != nil {
+		return fmt.Errorf("smtp send: %w", err)
+	}
+	return nil
+}
+
+type resendRequest struct {
+	From    string   `json:"from"`
+	To      []string `json:"to"`
+	Subject string   `json:"subject"`
+	HTML    string   `json:"html"`
+}
+
+func (m *Mailer) sendResend(ctx context.Context, to, subject, htmlBody string) error {
+	body, err := json.Marshal(resendRequest{
+		From:    m.resendFrom,
+		To:      []string{to},
+		Subject: subject,
+		HTML:    htmlBody,
+	})
+	if err != nil {
+		return fmt.Errorf("resend marshal: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.resend.com/emails", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("resend request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+m.resendAPIKey)
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("resend send: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("resend: unexpected status %d", resp.StatusCode)
+	}
+	return nil
+}

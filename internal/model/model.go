@@ -11,9 +11,11 @@ const (
 
 // User represents an authenticated user.
 type User struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Email        string `json:"email"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Email      string `json:"email"`
+	IsVerified bool   `json:"is_verified"`
+
 	PasswordHash string `json:"-"`
 	CreatedAt    int64  `json:"created_at"`
 	UpdatedAt    int64  `json:"updated_at"`
@@ -82,14 +84,20 @@ type Tag struct {
 // ─── Request / Response DTOs ──────────────────────────────────────────────────
 
 type RegisterRequest struct {
-	Name     string `json:"name"     binding:"required,min=1,max=100"`
-	Email    string `json:"email"    binding:"required,email"`
-	Password string `json:"password" binding:"required,min=8"`
+	Name         string `json:"name"          binding:"required,min=1,max=100"`
+	Email        string `json:"email"         binding:"required,email"`
+	Password     string `json:"password"      binding:"required,min=10"`
+	CaptchaToken string `json:"captcha_token"`
 }
 
 type LoginRequest struct {
-	Email    string `json:"email"    binding:"required,email"`
-	Password string `json:"password" binding:"required"`
+	Email        string `json:"email"         binding:"required,email"`
+	Password     string `json:"password"      binding:"required"`
+	CaptchaToken string `json:"captcha_token"`
+}
+
+type ResendVerificationRequest struct {
+	Email string `json:"email" binding:"required,email"`
 }
 
 type AuthResponse struct {

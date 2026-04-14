@@ -1,12 +1,15 @@
 -- TabSlate Server Schema — PostgreSQL 17+
 
 CREATE TABLE IF NOT EXISTS users (
-    id            TEXT PRIMARY KEY,
-    name          TEXT NOT NULL,
-    email         TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    created_at    BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
-    updated_at    BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    id                      TEXT PRIMARY KEY,
+    name                    TEXT NOT NULL,
+    email                   TEXT NOT NULL UNIQUE,
+    password_hash           TEXT NOT NULL,
+    is_verified             BOOLEAN NOT NULL DEFAULT FALSE,
+    verification_token      TEXT,
+    verification_expires_at BIGINT,
+    created_at              BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+    updated_at              BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
 );
 
 -- Refresh tokens for JWT rotation
@@ -85,6 +88,12 @@ CREATE TABLE IF NOT EXISTS bookmark_tags (
     PRIMARY KEY (bookmark_id, tag_id)
 );
 
+-- Login failure tracking (for conditional captcha on login)
+CREATE TABLE IF NOT EXISTS login_failures (
+    email      TEXT NOT NULL,
+    failed_at  BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_workspaces_user     ON workspaces(user_id);
 CREATE INDEX IF NOT EXISTS idx_collections_user    ON collections(user_id);
@@ -95,3 +104,22 @@ CREATE INDEX IF NOT EXISTS idx_tags_user           ON tags(user_id);
 CREATE INDEX IF NOT EXISTS idx_bookmarks_updated   ON bookmarks(user_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_workspaces_updated  ON workspaces(user_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_collections_updated ON collections(user_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_login_failures_email ON login_failures(email, failed_at);
+
+-- ── Migrations ───────────────────────────────────────────────────────────────
+-- These ALTER statements are idempotent: they silently succeed if the column
+-- already exists (DO NOTHING on conflict for PG 17+). Wrapped in DO blocks.
+DO $$ BEGIN
+    ALTER TABLE users ADD COLUMN is_verified BOOLEAN NOT NULL DEFAULT FALSE;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE users ADD COLUMN verification_token TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE users ADD COLUMN verification_expires_at BIGINT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;

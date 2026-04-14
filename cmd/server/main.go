@@ -36,6 +36,7 @@ func main() {
 	}
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
+	// Captcha verifier and mailer are created inside app.New() from Config.
 	srv := app.New(cfg, database, bp)
 	srv.Run()
 }

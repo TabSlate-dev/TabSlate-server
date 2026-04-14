@@ -2,12 +2,15 @@ package app
 
 import (
 	"log"
+	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/tabslate/server/billing"
 	"github.com/tabslate/server/db"
+	"github.com/tabslate/server/internal/captcha"
 	"github.com/tabslate/server/internal/handler"
+	"github.com/tabslate/server/internal/mailer"
 	"github.com/tabslate/server/internal/middleware"
 )
 
@@ -18,19 +21,48 @@ type Server struct {
 	cfg     *Config
 	db      *db.DB
 	billing billing.Provider
+	captcha *captcha.Verifier
+	mailer  *mailer.Mailer
 	router  *gin.Engine
 }
 
-// New creates and configures the server. Call Run to start listening.
+// New creates and configures the server. Captcha and mailer services are
+// created automatically from Config so that external modules (Cloud) do not
+// need to import internal packages. Call Run to start listening.
 func New(cfg *Config, database *db.DB, bp billing.Provider) *Server {
 	if cfg.GinMode != "" {
 		gin.SetMode(cfg.GinMode)
+	}
+
+	// Create captcha verifier from config.
+	cv := captcha.New(cfg.ProsopoSecret, cfg.ProsopoServerURL)
+	if cv.Enabled() {
+		log.Println("prosopo captcha enabled")
+	}
+
+	// Create mailer from config.
+	m := mailer.New(mailer.Config{
+		Provider:     cfg.MailProvider,
+		SMTPHost:     cfg.SMTPHost,
+		SMTPPort:     cfg.SMTPPort,
+		SMTPUser:     cfg.SMTPUser,
+		SMTPPassword: cfg.SMTPPassword,
+		SMTPFrom:     cfg.SMTPFrom,
+		ResendAPIKey: cfg.ResendAPIKey,
+		ResendFrom:   cfg.ResendFrom,
+	})
+	if m.Enabled() {
+		log.Printf("email provider: %s", cfg.MailProvider)
+	} else {
+		log.Println("email disabled — users will be auto-verified")
 	}
 
 	s := &Server{
 		cfg:     cfg,
 		db:      database,
 		billing: bp,
+		captcha: cv,
+		mailer:  m,
 		router:  gin.Default(),
 	}
 	s.setupCORS()
@@ -68,7 +100,7 @@ func (s *Server) setupCORS() {
 }
 
 func (s *Server) setupRoutes() {
-	authH := handler.NewAuthHandler(s.db, s.cfg.JWTSecret, s.billing)
+	authH := handler.NewAuthHandler(s.db, s.cfg.JWTSecret, s.billing, s.captcha, s.mailer, s.cfg.VerifyBaseURL)
 	wsH := handler.NewWorkspaceHandler(s.db)
 	colH := handler.NewCollectionHandler(s.db)
 	bmH := handler.NewBookmarkHandler(s.db)
@@ -76,13 +108,20 @@ func (s *Server) setupRoutes() {
 	syncH := handler.NewSyncHandler(s.db)
 	billH := handler.NewBillingHandler(s.billing)
 
+	// ── Rate limiters ─────────────────────────────────────────────────────────
+	// 10 requests/minute per IP for auth endpoints (register, login, resend).
+	authRL := middleware.NewRateLimiter(10, 1*time.Minute)
+
 	// ── Public routes ─────────────────────────────────────────────────────────
 	auth := s.router.Group("/auth")
 	{
-		auth.POST("/register", authH.Register)
-		auth.POST("/login", authH.Login)
+		auth.POST("/register", middleware.RateLimitByIP(authRL), authH.Register)
+		auth.POST("/login", middleware.RateLimitByIP(authRL), authH.Login)
 		auth.POST("/refresh", authH.Refresh)
 		auth.POST("/logout", authH.Logout)
+		auth.GET("/verify-email", authH.VerifyEmail)
+		auth.POST("/resend-verification", middleware.RateLimitByIP(authRL), authH.ResendVerification)
+		auth.GET("/login-captcha-status", authH.LoginCaptchaStatus)
 	}
 
 	// ── Protected routes ──────────────────────────────────────────────────────
