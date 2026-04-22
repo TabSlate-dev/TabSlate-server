@@ -97,7 +97,24 @@ type LoginRequest struct {
 }
 
 type ResendVerificationRequest struct {
+	Email        string `json:"email"         binding:"required,email"`
+	CaptchaToken string `json:"captcha_token"`
+}
+
+type VerifyEmailOTPRequest struct {
 	Email string `json:"email" binding:"required,email"`
+	Code  string `json:"code"  binding:"required,min=6,max=6"`
+}
+
+type ForgotPasswordRequest struct {
+	Email        string `json:"email"         binding:"required,email"`
+	CaptchaToken string `json:"captcha_token"`
+}
+
+type ResetPasswordRequest struct {
+	Email       string `json:"email"        binding:"required,email"`
+	Code        string `json:"code"         binding:"required,min=6,max=6"`
+	NewPassword string `json:"new_password" binding:"required,min=10"`
 }
 
 type AuthResponse struct {

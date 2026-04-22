@@ -3,9 +3,10 @@ package handler
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
+	"crypto/sha256"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"time"
 	"unicode"
@@ -29,8 +30,18 @@ const (
 	// loginFailureWindow is how far back we look for login failures.
 	loginFailureWindow = 15 * time.Minute
 
-	// verificationTokenTTL is how long an email verification token is valid.
-	verificationTokenTTL = 24 * time.Hour
+	// otpTTL is how long a 6-digit OTP is valid (email verification or reset).
+	otpTTL = 10 * time.Minute
+
+	// otpEmailCooldown is the minimum interval between OTP emails to the same address.
+	otpEmailCooldown = 60 * time.Second
+
+	// otpIPThreshold is the number of OTP requests per IP within otpIPWindow
+	// after which captcha is required.
+	otpIPThreshold = 5
+
+	// otpIPWindow is the look-back period for per-IP OTP request counting.
+	otpIPWindow = 1 * time.Hour
 )
 
 type AuthHandler struct {
@@ -39,20 +50,15 @@ type AuthHandler struct {
 	billing billing.Provider
 	captcha *captcha.Verifier
 	mailer  *mailer.Mailer
-
-	// verifyBaseURL is the base URL for building the verification link.
-	// e.g. "https://api.tabslate.app" → link becomes "<base>/auth/verify-email?token=xxx"
-	verifyBaseURL string
 }
 
-func NewAuthHandler(d *db.DB, secret string, bp billing.Provider, cv *captcha.Verifier, m *mailer.Mailer, verifyBaseURL string) *AuthHandler {
+func NewAuthHandler(d *db.DB, secret string, bp billing.Provider, cv *captcha.Verifier, m *mailer.Mailer) *AuthHandler {
 	return &AuthHandler{
-		db:            d,
-		secret:        secret,
-		billing:       bp,
-		captcha:       cv,
-		mailer:        m,
-		verifyBaseURL: verifyBaseURL,
+		db:      d,
+		secret:  secret,
+		billing: bp,
+		captcha: cv,
+		mailer:  m,
 	}
 }
 
@@ -66,7 +72,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	// ── Step 1: Captcha verification (must be first to prevent DB abuse) ─────
+	// ── Step 1: Captcha verification (guards all DB writes below) ───────────
 	if err := h.captcha.Verify(ctx, req.CaptchaToken); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "captcha verification failed"})
 		return
@@ -95,17 +101,18 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	userID := uuid.NewString()
 	now := time.Now().Unix()
 
-	// ── Step 4: Generate verification token ──────────────────────────────────
-	verifyToken := generateVerificationToken()
-	verifyExpires := time.Now().Add(verificationTokenTTL).Unix()
+	// ── Step 4: Generate email verification OTP ───────────────────────────────
+	otp := generateOTP()
+	otpHash := hashOTP(otp)
+	otpExpires := time.Now().Add(otpTTL).Unix()
 
-	// If email is disabled, auto-verify the user.
+	// If mailer is disabled, auto-verify the user immediately.
 	isVerified := !h.mailer.Enabled()
 
 	if _, err := h.db.Exec(ctx,
 		`INSERT INTO users (id, name, email, password_hash, is_verified, verification_token, verification_expires_at, created_at, updated_at)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		userID, req.Name, req.Email, hash, isVerified, verifyToken, verifyExpires, now, now,
+		userID, req.Name, req.Email, hash, isVerified, otpHash, otpExpires, now, now,
 	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
 		return
@@ -120,12 +127,12 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		uuid.NewString(), userID, now, now,
 	)
 
-	// ── Step 5: Send verification email or sync to Lago immediately ─────────
+	// ── Step 5: Send OTP email or sync to billing immediately ────────────────
 	if h.mailer.Enabled() {
-		go h.sendVerificationEmail(req.Email, req.Name, verifyToken)
+		go h.sendOTPEmail(req.Email, req.Name, otp, "verify")
 		// billing.OnUserCreated is deferred until email is verified.
 	} else {
-		// No email provider → user is auto-verified → sync to Lago now.
+		// No email provider → user is auto-verified → sync to billing now.
 		go h.billing.OnUserCreated(context.Background(), billing.UserInfo{ID: userID, Name: req.Name, Email: req.Email})
 	}
 
@@ -189,45 +196,79 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// GET /auth/verify-email?token=xxx
+const otpMaxAttempts = 5
+
+// POST /auth/verify-email  { email, code }
 func (h *AuthHandler) VerifyEmail(c *gin.Context) {
-	token := c.Query("token")
-	if token == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing token"})
+	var req model.VerifyEmailOTPRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	ctx := c.Request.Context()
 	now := time.Now().Unix()
 
-	var userID, name, email string
+	// Fetch the unverified user's OTP state (regardless of code correctness).
+	var userID, name, storedHash string
+	var otpExpires, attempts int64
 	err := h.db.QueryRow(ctx,
-		`SELECT id, name, email FROM users
-		 WHERE verification_token = $1
-		   AND verification_expires_at > $2
-		   AND is_verified = FALSE`,
-		token, now,
-	).Scan(&userID, &name, &email)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired verification token"})
+		`SELECT id, name, COALESCE(verification_token,''), COALESCE(verification_expires_at,0), verification_attempts
+		 FROM users
+		 WHERE email = $1 AND is_verified = FALSE`,
+		req.Email,
+	).Scan(&userID, &name, &storedHash, &otpExpires, &attempts)
+	if err != nil || storedHash == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired verification code"})
 		return
 	}
 
+	// Already invalidated due to prior exhausted attempts.
+	if attempts >= otpMaxAttempts {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "too many failed attempts, please request a new code"})
+		return
+	}
+
+	// Expired.
+	if now > otpExpires {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "verification code has expired, please request a new one"})
+		return
+	}
+
+	// Wrong code — increment counter, invalidate after reaching the limit.
+	if hashOTP(req.Code) != storedHash {
+		newAttempts := attempts + 1
+		if newAttempts >= otpMaxAttempts {
+			h.db.Exec(ctx,
+				`UPDATE users SET verification_token = NULL, verification_expires_at = NULL, verification_attempts = 0, updated_at = $1 WHERE id = $2`,
+				now, userID,
+			)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "too many failed attempts, please request a new code"})
+		} else {
+			h.db.Exec(ctx,
+				`UPDATE users SET verification_attempts = $1, updated_at = $2 WHERE id = $3`,
+				newAttempts, now, userID,
+			)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid verification code"})
+		}
+		return
+	}
+
+	// Correct — mark verified and clear OTP state.
 	if _, err := h.db.Exec(ctx,
-		`UPDATE users SET is_verified = TRUE, verification_token = NULL, verification_expires_at = NULL, updated_at = $1 WHERE id = $2`,
+		`UPDATE users SET is_verified = TRUE, verification_token = NULL, verification_expires_at = NULL, verification_attempts = 0, updated_at = $1 WHERE id = $2`,
 		now, userID,
 	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify email"})
 		return
 	}
 
-	// Now that the user is verified, sync to billing (Lago).
-	go h.billing.OnUserCreated(context.Background(), billing.UserInfo{ID: userID, Name: name, Email: email})
+	go h.billing.OnUserCreated(context.Background(), billing.UserInfo{ID: userID, Name: name, Email: req.Email})
 
 	c.JSON(http.StatusOK, gin.H{"message": "email verified successfully"})
 }
 
-// POST /auth/resend-verification
+// POST /auth/resend-verification  { email, captcha_token? }
 func (h *AuthHandler) ResendVerification(c *gin.Context) {
 	var req model.ResendVerificationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -236,36 +277,196 @@ func (h *AuthHandler) ResendVerification(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+	ip := c.ClientIP()
+
+	// ── Per-IP captcha check ──────────────────────────────────────────────────
+	if h.otpIPRequestCount(ctx, ip) >= otpIPThreshold {
+		if err := h.captcha.Verify(ctx, req.CaptchaToken); err != nil {
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":            "captcha required",
+				"captcha_required": true,
+			})
+			return
+		}
+	}
 
 	var userID, name string
 	var isVerified bool
+	var lastSentAt int64
 	err := h.db.QueryRow(ctx,
-		`SELECT id, name, is_verified FROM users WHERE email = $1`, req.Email,
-	).Scan(&userID, &name, &isVerified)
-	if err != nil {
-		// Don't reveal whether email exists — always return success.
-		c.JSON(http.StatusOK, gin.H{"message": "if the email is registered, a verification link has been sent"})
+		`SELECT id, name, is_verified, COALESCE(otp_last_sent_at, 0) FROM users WHERE email = $1`, req.Email,
+	).Scan(&userID, &name, &isVerified, &lastSentAt)
+	if err != nil || isVerified {
+		h.recordOTPIPRequest(ctx, ip)
+		c.JSON(http.StatusOK, gin.H{"message": "if the email is registered and unverified, a new code has been sent"})
 		return
 	}
 
-	if isVerified {
-		c.JSON(http.StatusOK, gin.H{"message": "if the email is registered, a verification link has been sent"})
+	// ── Per-email cooldown check ──────────────────────────────────────────────
+	if wait := int64(otpEmailCooldown.Seconds()) - (time.Now().Unix() - lastSentAt); wait > 0 {
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error":       "please wait before requesting another code",
+			"retry_after": wait,
+		})
 		return
 	}
 
-	// Generate new token.
-	verifyToken := generateVerificationToken()
-	verifyExpires := time.Now().Add(verificationTokenTTL).Unix()
+	otp := generateOTP()
+	otpHash := hashOTP(otp)
+	otpExpires := time.Now().Add(otpTTL).Unix()
 	now := time.Now().Unix()
 
 	h.db.Exec(ctx,
-		`UPDATE users SET verification_token = $1, verification_expires_at = $2, updated_at = $3 WHERE id = $4`,
-		verifyToken, verifyExpires, now, userID,
+		`UPDATE users SET verification_token = $1, verification_expires_at = $2, otp_last_sent_at = $3, verification_attempts = 0, updated_at = $3 WHERE id = $4`,
+		otpHash, otpExpires, now, userID,
 	)
+	h.recordOTPIPRequest(ctx, ip)
 
-	go h.sendVerificationEmail(req.Email, name, verifyToken)
+	go h.sendOTPEmail(req.Email, name, otp, "verify")
 
-	c.JSON(http.StatusOK, gin.H{"message": "if the email is registered, a verification link has been sent"})
+	c.JSON(http.StatusOK, gin.H{"message": "if the email is registered and unverified, a new code has been sent"})
+}
+
+// POST /auth/forgot-password  { email, captcha_token? }
+func (h *AuthHandler) ForgotPassword(c *gin.Context) {
+	var req model.ForgotPasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+	ip := c.ClientIP()
+
+	// ── Per-IP captcha check ──────────────────────────────────────────────────
+	if h.otpIPRequestCount(ctx, ip) >= otpIPThreshold {
+		if err := h.captcha.Verify(ctx, req.CaptchaToken); err != nil {
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":            "captcha required",
+				"captcha_required": true,
+			})
+			return
+		}
+	}
+
+	var userID, name string
+	var lastSentAt int64
+	err := h.db.QueryRow(ctx,
+		`SELECT id, name, COALESCE(otp_last_sent_at, 0) FROM users WHERE email = $1`, req.Email,
+	).Scan(&userID, &name, &lastSentAt)
+	if err != nil {
+		// Don't reveal whether the email exists — still record IP request.
+		h.recordOTPIPRequest(ctx, ip)
+		c.JSON(http.StatusOK, gin.H{"message": "if the email is registered, a reset code has been sent"})
+		return
+	}
+
+	// ── Per-email cooldown check ──────────────────────────────────────────────
+	if wait := int64(otpEmailCooldown.Seconds()) - (time.Now().Unix() - lastSentAt); wait > 0 {
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error":       "please wait before requesting another code",
+			"retry_after": wait,
+		})
+		return
+	}
+
+	otp := generateOTP()
+	otpHash := hashOTP(otp)
+	otpExpires := time.Now().Add(otpTTL).Unix()
+	now := time.Now().Unix()
+
+	h.db.Exec(ctx,
+		`UPDATE users SET reset_otp_hash = $1, reset_otp_expires_at = $2, otp_last_sent_at = $3, reset_attempts = 0, updated_at = $3 WHERE id = $4`,
+		otpHash, otpExpires, now, userID,
+	)
+	h.recordOTPIPRequest(ctx, ip)
+
+	go h.sendOTPEmail(req.Email, name, otp, "reset")
+
+	c.JSON(http.StatusOK, gin.H{"message": "if the email is registered, a reset code has been sent"})
+}
+
+// GET /auth/otp-captcha-status
+// Returns whether the current IP has exceeded the OTP request threshold.
+func (h *AuthHandler) OTPCaptchaStatus(c *gin.Context) {
+	required := h.otpIPRequestCount(c.Request.Context(), c.ClientIP()) >= otpIPThreshold
+	c.JSON(http.StatusOK, gin.H{"captcha_required": required})
+}
+
+// POST /auth/reset-password  { email, code, new_password }
+func (h *AuthHandler) ResetPassword(c *gin.Context) {
+	var req model.ResetPasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := validatePasswordStrength(req.NewPassword); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+	now := time.Now().Unix()
+
+	// Fetch reset OTP state regardless of code correctness.
+	var userID, storedHash string
+	var otpExpires, attempts int64
+	err := h.db.QueryRow(ctx,
+		`SELECT id, COALESCE(reset_otp_hash,''), COALESCE(reset_otp_expires_at,0), reset_attempts
+		 FROM users WHERE email = $1`,
+		req.Email,
+	).Scan(&userID, &storedHash, &otpExpires, &attempts)
+	if err != nil || storedHash == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired reset code"})
+		return
+	}
+
+	if attempts >= otpMaxAttempts {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "too many failed attempts, please request a new code"})
+		return
+	}
+
+	if now > otpExpires {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "reset code has expired, please request a new one"})
+		return
+	}
+
+	if hashOTP(req.Code) != storedHash {
+		newAttempts := attempts + 1
+		if newAttempts >= otpMaxAttempts {
+			h.db.Exec(ctx,
+				`UPDATE users SET reset_otp_hash = NULL, reset_otp_expires_at = NULL, reset_attempts = 0, updated_at = $1 WHERE id = $2`,
+				now, userID,
+			)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "too many failed attempts, please request a new code"})
+		} else {
+			h.db.Exec(ctx,
+				`UPDATE users SET reset_attempts = $1, updated_at = $2 WHERE id = $3`,
+				newAttempts, now, userID,
+			)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid verification code"})
+		}
+		return
+	}
+
+	newHash, err := auth.HashPassword(req.NewPassword)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
+		return
+	}
+
+	if _, err := h.db.Exec(ctx,
+		`UPDATE users SET password_hash = $1, reset_otp_hash = NULL, reset_otp_expires_at = NULL, reset_attempts = 0, updated_at = $2 WHERE id = $3`,
+		newHash, now, userID,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reset password"})
+		return
+	}
+
+	h.db.Exec(ctx, `DELETE FROM refresh_tokens WHERE user_id = $1`, userID)
+
+	c.JSON(http.StatusOK, gin.H{"message": "password reset successfully"})
 }
 
 // POST /auth/refresh
@@ -346,7 +547,6 @@ func (h *AuthHandler) Me(c *gin.Context) {
 }
 
 // GET /auth/login-captcha-status?email=xxx
-// Returns whether captcha is required for a given email (used by frontend).
 func (h *AuthHandler) LoginCaptchaStatus(c *gin.Context) {
 	email := c.Query("email")
 	required := false
@@ -384,7 +584,6 @@ func (h *AuthHandler) issueTokens(user *model.User) (*model.AuthResponse, error)
 	}, nil
 }
 
-// loginFailureCount returns the number of recent login failures for the email.
 func (h *AuthHandler) loginFailureCount(ctx context.Context, email string) int {
 	cutoff := time.Now().Add(-loginFailureWindow).Unix()
 	var count int
@@ -395,40 +594,72 @@ func (h *AuthHandler) loginFailureCount(ctx context.Context, email string) int {
 	return count
 }
 
-// recordLoginFailure inserts a login failure row for rate-limiting/captcha purposes.
 func (h *AuthHandler) recordLoginFailure(ctx context.Context, email string) {
 	now := time.Now().Unix()
 	h.db.Exec(ctx, `INSERT INTO login_failures (email, failed_at) VALUES ($1, $2)`, email, now)
 }
 
-// sendVerificationEmail sends the verification email asynchronously.
-func (h *AuthHandler) sendVerificationEmail(to, name, token string) {
-	link := fmt.Sprintf("%s/auth/verify-email?token=%s", h.verifyBaseURL, token)
-	subject := "Verify your TabSlate email"
+// otpIPRequestCount returns how many OTP requests originated from ip within otpIPWindow.
+func (h *AuthHandler) otpIPRequestCount(ctx context.Context, ip string) int {
+	cutoff := time.Now().Add(-otpIPWindow).Unix()
+	var count int
+	h.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM otp_ip_requests WHERE ip = $1 AND requested_at > $2`,
+		ip, cutoff,
+	).Scan(&count)
+	return count
+}
+
+// recordOTPIPRequest inserts a new OTP request row for ip.
+func (h *AuthHandler) recordOTPIPRequest(ctx context.Context, ip string) {
+	h.db.Exec(ctx,
+		`INSERT INTO otp_ip_requests (ip, requested_at) VALUES ($1, $2)`,
+		ip, time.Now().Unix(),
+	)
+}
+
+// sendOTPEmail sends a 6-digit OTP email. purpose: "verify" or "reset".
+func (h *AuthHandler) sendOTPEmail(to, name, code, purpose string) {
+	var subject, intro, note string
+	switch purpose {
+	case "reset":
+		subject = "Reset your TabSlate password"
+		intro = "Use the code below to reset your password. It expires in 10 minutes."
+		note = "If you didn't request a password reset, you can safely ignore this email."
+	default:
+		subject = "Verify your TabSlate email"
+		intro = "Use the code below to verify your email address. It expires in 10 minutes."
+		note = "If you didn't create an account, you can safely ignore this email."
+	}
+
 	body := fmt.Sprintf(`<html><body>
 <p>Hi %s,</p>
-<p>Thanks for signing up for TabSlate! Please verify your email by clicking the link below:</p>
-<p><a href="%s">Verify Email</a></p>
-<p>This link expires in 24 hours.</p>
-<p>If you didn't create an account, you can safely ignore this email.</p>
-</body></html>`, name, link)
+<p>%s</p>
+<p style="font-size:2em;letter-spacing:0.15em;font-weight:bold;">%s</p>
+<p>%s</p>
+</body></html>`, name, intro, code, note)
 
 	if err := h.mailer.Send(context.Background(), to, subject, body); err != nil {
-		log.Printf("failed to send verification email to %s: %v", to, err)
+		log.Printf("failed to send OTP email to %s: %v", to, err)
 	}
 }
 
-// generateVerificationToken returns a 32-byte hex-encoded random token.
-func generateVerificationToken() string {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
+// generateOTP returns a random 6-digit string ("100000"–"999999").
+func generateOTP() string {
+	n, err := rand.Int(rand.Reader, big.NewInt(900000))
+	if err != nil {
 		panic(fmt.Sprintf("crypto/rand: %v", err))
 	}
-	return hex.EncodeToString(b)
+	return fmt.Sprintf("%06d", n.Int64()+100000)
 }
 
-// validatePasswordStrength enforces minimum password requirements:
-// at least 10 characters, at least one letter, at least one digit.
+// hashOTP returns the hex-encoded SHA-256 of the OTP code.
+func hashOTP(code string) string {
+	h := sha256.Sum256([]byte(code))
+	return fmt.Sprintf("%x", h)
+}
+
+// validatePasswordStrength enforces minimum password requirements.
 func validatePasswordStrength(password string) error {
 	if len(password) < 10 {
 		return fmt.Errorf("password must be at least 10 characters")

@@ -123,3 +123,35 @@ DO $$ BEGIN
     ALTER TABLE users ADD COLUMN verification_expires_at BIGINT;
 EXCEPTION WHEN duplicate_column THEN NULL;
 END $$;
+
+DO $$ BEGIN
+    ALTER TABLE users ADD COLUMN reset_otp_hash TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE users ADD COLUMN reset_otp_expires_at BIGINT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE users ADD COLUMN otp_last_sent_at BIGINT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE users ADD COLUMN verification_attempts INT NOT NULL DEFAULT 0;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE users ADD COLUMN reset_attempts INT NOT NULL DEFAULT 0;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
+-- Per-IP OTP request log (for captcha threshold enforcement)
+CREATE TABLE IF NOT EXISTS otp_ip_requests (
+    ip           TEXT   NOT NULL,
+    requested_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_otp_ip_requests ON otp_ip_requests(ip, requested_at);

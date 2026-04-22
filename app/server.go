@@ -100,7 +100,8 @@ func (s *Server) setupCORS() {
 }
 
 func (s *Server) setupRoutes() {
-	authH := handler.NewAuthHandler(s.db, s.cfg.JWTSecret, s.billing, s.captcha, s.mailer, s.cfg.VerifyBaseURL)
+	authH := handler.NewAuthHandler(s.db, s.cfg.JWTSecret, s.billing, s.captcha, s.mailer)
+	captchaH := handler.NewCaptchaHandler(s.cfg.ProsopoBundleURL)
 	wsH := handler.NewWorkspaceHandler(s.db)
 	colH := handler.NewCollectionHandler(s.db)
 	bmH := handler.NewBookmarkHandler(s.db)
@@ -113,15 +114,21 @@ func (s *Server) setupRoutes() {
 	authRL := middleware.NewRateLimiter(10, 1*time.Minute)
 
 	// ── Public routes ─────────────────────────────────────────────────────────
+	s.router.GET("/captcha/widget", captchaH.Widget)
+	s.router.GET("/captcha/widget.js", captchaH.WidgetJS)
+
 	auth := s.router.Group("/auth")
 	{
 		auth.POST("/register", middleware.RateLimitByIP(authRL), authH.Register)
 		auth.POST("/login", middleware.RateLimitByIP(authRL), authH.Login)
 		auth.POST("/refresh", authH.Refresh)
 		auth.POST("/logout", authH.Logout)
-		auth.GET("/verify-email", authH.VerifyEmail)
+		auth.POST("/verify-email", middleware.RateLimitByIP(authRL), authH.VerifyEmail)
 		auth.POST("/resend-verification", middleware.RateLimitByIP(authRL), authH.ResendVerification)
+		auth.POST("/forgot-password", middleware.RateLimitByIP(authRL), authH.ForgotPassword)
+		auth.POST("/reset-password", middleware.RateLimitByIP(authRL), authH.ResetPassword)
 		auth.GET("/login-captcha-status", authH.LoginCaptchaStatus)
+		auth.GET("/otp-captcha-status", authH.OTPCaptchaStatus)
 	}
 
 	// ── Protected routes ──────────────────────────────────────────────────────

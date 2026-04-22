@@ -32,6 +32,11 @@ type Config struct {
 	// Prosopo API but can be overridden for self-hosted deployments.
 	ProsopoServerURL string
 
+	// ProsopoBundleURL is the URL of the procaptcha JS bundle served to the
+	// browser widget iframe. Defaults to the official Prosopo CDN. Override for
+	// self-hosted Prosopo deployments.
+	ProsopoBundleURL string
+
 	// ── Email ────────────────────────────────────────────────────────────────
 	// MailProvider selects the email backend: "smtp" or "resend".
 	// Leave empty to disable email verification (all users auto-verified).
@@ -48,9 +53,6 @@ type Config struct {
 	ResendAPIKey string
 	ResendFrom   string
 
-	// VerifyBaseURL is the base URL for the email verification link,
-	// e.g. "https://api.tabslate.app" — the token is appended as a query param.
-	VerifyBaseURL string
 }
 
 // LoadConfig reads configuration from environment variables and fatals on any
@@ -66,6 +68,7 @@ func LoadConfig() *Config {
 		// Prosopo
 		ProsopoSecret:    os.Getenv("PROSOPO_SECRET"),
 		ProsopoServerURL: envOr("PROSOPO_SERVER_URL", "https://api.prosopo.io/siteverify"),
+		ProsopoBundleURL: envOr("PROSOPO_BUNDLE_URL", "https://js.prosopo.io/js/procaptcha.bundle.js"),
 
 		// Email
 		MailProvider:  os.Getenv("MAIL_PROVIDER"),
@@ -76,7 +79,6 @@ func LoadConfig() *Config {
 		SMTPFrom:      os.Getenv("SMTP_FROM"),
 		ResendAPIKey:  os.Getenv("RESEND_API_KEY"),
 		ResendFrom:    os.Getenv("RESEND_FROM"),
-		VerifyBaseURL: os.Getenv("VERIFY_BASE_URL"),
 	}
 }
 
