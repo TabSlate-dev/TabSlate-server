@@ -109,10 +109,18 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	// If mailer is disabled, auto-verify the user immediately.
 	isVerified := !h.mailer.Enabled()
 
+	// Set otp_last_sent_at only when we actually send an email, so that the
+	// per-email 60-second cooldown applies immediately after registration and
+	// the resend endpoint cannot be called without the cooldown being enforced.
+	var otpLastSentAt interface{}
+	if h.mailer.Enabled() {
+		otpLastSentAt = now
+	}
+
 	if _, err := h.db.Exec(ctx,
-		`INSERT INTO users (id, name, email, password_hash, is_verified, verification_token, verification_expires_at, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		userID, req.Name, req.Email, hash, isVerified, otpHash, otpExpires, now, now,
+		`INSERT INTO users (id, name, email, password_hash, is_verified, verification_token, verification_expires_at, otp_last_sent_at, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		userID, req.Name, req.Email, hash, isVerified, otpHash, otpExpires, otpLastSentAt, now, now,
 	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
 		return
@@ -187,6 +195,29 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	// Clear failures on success.
 	h.db.Exec(ctx, `DELETE FROM login_failures WHERE email = $1`, req.Email)
+
+	// If the user hasn't verified their email yet, refresh the OTP so they
+	// always have a fresh code when they arrive at the verification screen.
+	// The per-email cooldown still applies to avoid duplicate sends when the
+	// user logs in repeatedly in quick succession.
+	if !user.IsVerified && h.mailer.Enabled() {
+		var lastSentAt int64
+		h.db.QueryRow(ctx,
+			`SELECT COALESCE(otp_last_sent_at, 0) FROM users WHERE id = $1`, user.ID,
+		).Scan(&lastSentAt)
+
+		if wait := int64(otpEmailCooldown.Seconds()) - (time.Now().Unix() - lastSentAt); wait <= 0 {
+			otp := generateOTP()
+			otpHash := hashOTP(otp)
+			otpExpires := time.Now().Add(otpTTL).Unix()
+			loginNow := time.Now().Unix()
+			h.db.Exec(ctx,
+				`UPDATE users SET verification_token = $1, verification_expires_at = $2, otp_last_sent_at = $3, verification_attempts = 0, updated_at = $3 WHERE id = $4`,
+				otpHash, otpExpires, loginNow, user.ID,
+			)
+			go h.sendOTPEmail(user.Email, user.Name, otp, "verify")
+		}
+	}
 
 	resp, err := h.issueTokens(&user)
 	if err != nil {
@@ -528,6 +559,20 @@ func (h *AuthHandler) Me(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
+	}
+
+	// If the provider supports proactive reconciliation (Cloud only), ensure
+	// the user is synced to the billing platform. Runs in a goroutine so it
+	// never adds latency to this endpoint. Handles the case where all
+	// OnUserCreated retries failed during registration.
+	if syncer, ok := h.billing.(billing.UserSyncer); ok && user.IsVerified {
+		go func() {
+			if err := syncer.EnsureUserSynced(context.Background(), billing.UserInfo{
+				ID: user.ID, Name: user.Name, Email: user.Email,
+			}); err != nil {
+				log.Printf("EnsureUserSynced user %s: %v", user.ID, err)
+			}
+		}()
 	}
 
 	sub, err := h.billing.GetSubscription(ctx, userID)

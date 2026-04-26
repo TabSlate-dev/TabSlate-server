@@ -43,3 +43,16 @@ type Provider interface {
 type WebhookHandler interface {
 	HandleWebhook(ctx context.Context, payload []byte, signature string) error
 }
+
+// UserSyncer is an optional interface implemented by providers that support
+// proactive reconciliation of user data with the billing platform.
+//
+// Cloud implements this so that /auth/me can silently re-sync users who
+// slipped through during registration (e.g. all OnUserCreated retries failed).
+// OSS does not implement this interface.
+type UserSyncer interface {
+	// EnsureUserSynced checks whether the user exists in the billing platform
+	// and creates them if not. It is idempotent and safe to call on every
+	// login/profile fetch.
+	EnsureUserSynced(ctx context.Context, user UserInfo) error
+}

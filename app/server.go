@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -74,6 +76,25 @@ func New(cfg *Config, database *db.DB, bp billing.Provider) *Server {
 // Called by the Cloud edition after New() to attach the Lago webhook handler.
 func (s *Server) RegisterWebhook(path string, h gin.HandlerFunc) {
 	s.router.POST(path, h)
+}
+
+// SyncSubscription updates the local subscriptions table to match the billing
+// platform's state. Called by the Cloud edition when a Lago webhook confirms
+// a plan change, so that internal/plan quota checks stay accurate.
+//
+// For active plans supply the Lago plan code (e.g. "pro") and status "active".
+// For terminated/cancelled subscriptions, supply planCode "free" and status "active"
+// to fall the user back to the free tier automatically.
+func (s *Server) SyncSubscription(ctx context.Context, userID, planCode, status string) error {
+	now := time.Now().Unix()
+	_, err := s.db.Exec(ctx,
+		`UPDATE subscriptions SET plan = $1, status = $2, updated_at = $3 WHERE user_id = $4`,
+		planCode, status, now, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("sync subscription: %w", err)
+	}
+	return nil
 }
 
 // Run starts the HTTP server and blocks until it exits.
