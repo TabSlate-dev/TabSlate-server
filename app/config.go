@@ -3,6 +3,8 @@ package app
 import (
 	"log"
 	"os"
+	"strconv"
+	"time"
 )
 
 // Config holds all runtime configuration read from environment variables.
@@ -53,6 +55,24 @@ type Config struct {
 	ResendAPIKey string
 	ResendFrom   string
 
+	// ── Registration captcha ─────────────────────────────────────────────────
+	// RegisterCaptchaThreshold is the number of successful registrations from a
+	// single IP within RegisterCaptchaWindow before captcha is required.
+	// Set to 0 to always require captcha. Defaults to 3.
+	RegisterCaptchaThreshold int
+
+	// RegisterCaptchaWindow is the look-back period for per-IP registration
+	// counting. Accepts any Go duration string (e.g. "24h", "1h"). Defaults to 24h.
+	RegisterCaptchaWindow time.Duration
+
+	// OTPCaptchaThreshold is the number of OTP email requests from a single IP
+	// within OTPCaptchaWindow before captcha is required on resend/forgot-password.
+	// Set to 0 to always require captcha. Defaults to 5.
+	OTPCaptchaThreshold int
+
+	// OTPCaptchaWindow is the look-back period for per-IP OTP request counting.
+	// Accepts any Go duration string. Defaults to 15m.
+	OTPCaptchaWindow time.Duration
 }
 
 // LoadConfig reads configuration from environment variables and fatals on any
@@ -79,6 +99,14 @@ func LoadConfig() *Config {
 		SMTPFrom:      os.Getenv("SMTP_FROM"),
 		ResendAPIKey:  os.Getenv("RESEND_API_KEY"),
 		ResendFrom:    os.Getenv("RESEND_FROM"),
+
+		// Registration captcha
+		RegisterCaptchaThreshold: envInt("REGISTER_CAPTCHA_THRESHOLD", 3),
+		RegisterCaptchaWindow:    envDuration("REGISTER_CAPTCHA_WINDOW", 24*time.Hour),
+
+		// OTP resend captcha
+		OTPCaptchaThreshold: envInt("OTP_CAPTCHA_THRESHOLD", 5),
+		OTPCaptchaWindow:    envDuration("OTP_CAPTCHA_WINDOW", 15*time.Minute),
 	}
 }
 
@@ -93,6 +121,26 @@ func mustEnv(key string) string {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+		log.Printf("invalid integer for %s, using default %d", key, fallback)
+	}
+	return fallback
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		log.Printf("invalid duration for %s, using default %s", key, fallback)
 	}
 	return fallback
 }

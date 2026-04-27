@@ -155,3 +155,10 @@ CREATE TABLE IF NOT EXISTS otp_ip_requests (
     requested_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_otp_ip_requests ON otp_ip_requests(ip, requested_at);
+
+-- Per-IP registration log (for conditional captcha on register)
+CREATE TABLE IF NOT EXISTS register_ip_requests (
+    ip            TEXT   NOT NULL,
+    registered_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_register_ip_requests ON register_ip_requests(ip, registered_at);

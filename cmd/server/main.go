@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"log"
+	"os/signal"
+	"syscall"
 
 	"github.com/joho/godotenv"
 	"github.com/tabslate/server/app"
@@ -35,8 +38,14 @@ func main() {
 		log.Fatalf("billing provider: %v", err)
 	}
 
+	// ── Process lifetime context ──────────────────────────────────────────────
+	// Cancelled on SIGINT / SIGTERM so background goroutines (e.g. cleanup
+	// tasks) stop cleanly before the process exits.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	// Captcha verifier and mailer are created inside app.New() from Config.
-	srv := app.New(cfg, database, bp)
+	srv := app.New(cfg, database, bp, ctx)
 	srv.Run()
 }

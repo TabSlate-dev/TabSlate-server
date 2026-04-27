@@ -26,12 +26,15 @@ type Server struct {
 	captcha *captcha.Verifier
 	mailer  *mailer.Mailer
 	router  *gin.Engine
+	ctx     context.Context
 }
 
 // New creates and configures the server. Captcha and mailer services are
 // created automatically from Config so that external modules (Cloud) do not
 // need to import internal packages. Call Run to start listening.
-func New(cfg *Config, database *db.DB, bp billing.Provider) *Server {
+// ctx controls background goroutines (cleanup tasks); pass a context tied to
+// the process lifetime, e.g. a signal-cancellable context from main.
+func New(cfg *Config, database *db.DB, bp billing.Provider, ctx context.Context) *Server {
 	if cfg.GinMode != "" {
 		gin.SetMode(cfg.GinMode)
 	}
@@ -66,6 +69,7 @@ func New(cfg *Config, database *db.DB, bp billing.Provider) *Server {
 		captcha: cv,
 		mailer:  m,
 		router:  gin.Default(),
+		ctx:     ctx,
 	}
 	s.setupCORS()
 	s.setupRoutes()
@@ -121,7 +125,10 @@ func (s *Server) setupCORS() {
 }
 
 func (s *Server) setupRoutes() {
-	authH := handler.NewAuthHandler(s.db, s.cfg.JWTSecret, s.billing, s.captcha, s.mailer)
+	authH := handler.NewAuthHandler(s.db, s.cfg.JWTSecret, s.billing, s.captcha, s.mailer,
+		s.cfg.RegisterCaptchaThreshold, s.cfg.RegisterCaptchaWindow,
+		s.cfg.OTPCaptchaThreshold, s.cfg.OTPCaptchaWindow)
+	authH.StartCleanup(s.ctx)
 	captchaH := handler.NewCaptchaHandler(s.cfg.ProsopoBundleURL)
 	wsH := handler.NewWorkspaceHandler(s.db)
 	colH := handler.NewCollectionHandler(s.db)
@@ -150,6 +157,7 @@ func (s *Server) setupRoutes() {
 		auth.POST("/reset-password", middleware.RateLimitByIP(authRL), authH.ResetPassword)
 		auth.GET("/login-captcha-status", authH.LoginCaptchaStatus)
 		auth.GET("/otp-captcha-status", authH.OTPCaptchaStatus)
+		auth.GET("/register-captcha-status", authH.RegisterCaptchaStatus)
 	}
 
 	// ── Protected routes ──────────────────────────────────────────────────────

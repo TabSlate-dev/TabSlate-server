@@ -36,12 +36,6 @@ const (
 	// otpEmailCooldown is the minimum interval between OTP emails to the same address.
 	otpEmailCooldown = 60 * time.Second
 
-	// otpIPThreshold is the number of OTP requests per IP within otpIPWindow
-	// after which captcha is required.
-	otpIPThreshold = 5
-
-	// otpIPWindow is the look-back period for per-IP OTP request counting.
-	otpIPWindow = 1 * time.Hour
 )
 
 type AuthHandler struct {
@@ -50,15 +44,35 @@ type AuthHandler struct {
 	billing billing.Provider
 	captcha *captcha.Verifier
 	mailer  *mailer.Mailer
+
+	registerCaptchaThreshold int
+	registerCaptchaWindow    time.Duration
+
+	otpCaptchaThreshold int
+	otpCaptchaWindow    time.Duration
 }
 
-func NewAuthHandler(d *db.DB, secret string, bp billing.Provider, cv *captcha.Verifier, m *mailer.Mailer) *AuthHandler {
+func NewAuthHandler(
+	d *db.DB,
+	secret string,
+	bp billing.Provider,
+	cv *captcha.Verifier,
+	m *mailer.Mailer,
+	registerThreshold int,
+	registerWindow time.Duration,
+	otpThreshold int,
+	otpWindow time.Duration,
+) *AuthHandler {
 	return &AuthHandler{
-		db:      d,
-		secret:  secret,
-		billing: bp,
-		captcha: cv,
-		mailer:  m,
+		db:                       d,
+		secret:                   secret,
+		billing:                  bp,
+		captcha:                  cv,
+		mailer:                   m,
+		registerCaptchaThreshold: registerThreshold,
+		registerCaptchaWindow:    registerWindow,
+		otpCaptchaThreshold:      otpThreshold,
+		otpCaptchaWindow:         otpWindow,
 	}
 }
 
@@ -73,9 +87,15 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	// ── Step 1: Captcha verification (guards all DB writes below) ───────────
-	if err := h.captcha.Verify(ctx, req.CaptchaToken); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "captcha verification failed"})
-		return
+	// Captcha is required once the IP has already registered at least
+	// registerCaptchaThreshold accounts within registerCaptchaWindow.
+	// A threshold of 0 means captcha is always required.
+	ip := c.ClientIP()
+	if h.captcha.Enabled() && h.registerIPRequestCount(ctx, ip) >= h.registerCaptchaThreshold {
+		if err := h.captcha.Verify(ctx, req.CaptchaToken); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "captcha verification failed"})
+			return
+		}
 	}
 
 	// ── Step 2: Password strength ────────────────────────────────────────────
@@ -134,6 +154,9 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		`INSERT INTO workspaces (id, user_id, name, position, created_at, updated_at) VALUES ($1,$2,'My Workspace',0,$3,$4)`,
 		uuid.NewString(), userID, now, now,
 	)
+
+	// Record this registration for per-IP captcha threshold tracking.
+	h.recordRegisterIPRequest(ctx, ip)
 
 	// ── Step 5: Send OTP email or sync to billing immediately ────────────────
 	if h.mailer.Enabled() {
@@ -311,7 +334,7 @@ func (h *AuthHandler) ResendVerification(c *gin.Context) {
 	ip := c.ClientIP()
 
 	// ── Per-IP captcha check ──────────────────────────────────────────────────
-	if h.otpIPRequestCount(ctx, ip) >= otpIPThreshold {
+	if h.otpIPRequestCount(ctx, ip) >= h.otpCaptchaThreshold {
 		if err := h.captcha.Verify(ctx, req.CaptchaToken); err != nil {
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error":            "captcha required",
@@ -370,7 +393,7 @@ func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 	ip := c.ClientIP()
 
 	// ── Per-IP captcha check ──────────────────────────────────────────────────
-	if h.otpIPRequestCount(ctx, ip) >= otpIPThreshold {
+	if h.otpIPRequestCount(ctx, ip) >= h.otpCaptchaThreshold {
 		if err := h.captcha.Verify(ctx, req.CaptchaToken); err != nil {
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error":            "captcha required",
@@ -420,7 +443,7 @@ func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 // GET /auth/otp-captcha-status
 // Returns whether the current IP has exceeded the OTP request threshold.
 func (h *AuthHandler) OTPCaptchaStatus(c *gin.Context) {
-	required := h.otpIPRequestCount(c.Request.Context(), c.ClientIP()) >= otpIPThreshold
+	required := h.otpIPRequestCount(c.Request.Context(), c.ClientIP()) >= h.otpCaptchaThreshold
 	c.JSON(http.StatusOK, gin.H{"captcha_required": required})
 }
 
@@ -591,6 +614,14 @@ func (h *AuthHandler) Me(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"user": user, "subscription": sub})
 }
 
+// GET /auth/register-captcha-status
+// Returns whether the current IP has reached the registration threshold.
+func (h *AuthHandler) RegisterCaptchaStatus(c *gin.Context) {
+	required := h.captcha.Enabled() &&
+		h.registerIPRequestCount(c.Request.Context(), c.ClientIP()) >= h.registerCaptchaThreshold
+	c.JSON(http.StatusOK, gin.H{"captcha_required": required})
+}
+
 // GET /auth/login-captcha-status?email=xxx
 func (h *AuthHandler) LoginCaptchaStatus(c *gin.Context) {
 	email := c.Query("email")
@@ -646,7 +677,7 @@ func (h *AuthHandler) recordLoginFailure(ctx context.Context, email string) {
 
 // otpIPRequestCount returns how many OTP requests originated from ip within otpIPWindow.
 func (h *AuthHandler) otpIPRequestCount(ctx context.Context, ip string) int {
-	cutoff := time.Now().Add(-otpIPWindow).Unix()
+	cutoff := time.Now().Add(-h.otpCaptchaWindow).Unix()
 	var count int
 	h.db.QueryRow(ctx,
 		`SELECT COUNT(*) FROM otp_ip_requests WHERE ip = $1 AND requested_at > $2`,
@@ -659,6 +690,60 @@ func (h *AuthHandler) otpIPRequestCount(ctx context.Context, ip string) int {
 func (h *AuthHandler) recordOTPIPRequest(ctx context.Context, ip string) {
 	h.db.Exec(ctx,
 		`INSERT INTO otp_ip_requests (ip, requested_at) VALUES ($1, $2)`,
+		ip, time.Now().Unix(),
+	)
+}
+
+// StartCleanup launches a background goroutine that periodically deletes
+// expired rows from the three rate-limit tables. It runs every 10 minutes
+// and removes rows that are older than their respective look-back windows,
+// since those rows can never influence a rate-limit decision again.
+// The goroutine stops when ctx is cancelled.
+func (h *AuthHandler) StartCleanup(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Minute)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				h.cleanupExpiredRateLimitRows()
+			}
+		}
+	}()
+}
+
+func (h *AuthHandler) cleanupExpiredRateLimitRows() {
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	loginCutoff := now - int64(loginFailureWindow.Seconds())
+	h.db.Exec(ctx, `DELETE FROM login_failures WHERE failed_at < $1`, loginCutoff)
+
+	otpCutoff := now - int64(h.otpCaptchaWindow.Seconds())
+	h.db.Exec(ctx, `DELETE FROM otp_ip_requests WHERE requested_at < $1`, otpCutoff)
+
+	regCutoff := now - int64(h.registerCaptchaWindow.Seconds())
+	h.db.Exec(ctx, `DELETE FROM register_ip_requests WHERE registered_at < $1`, regCutoff)
+}
+
+// registerIPRequestCount returns how many successful registrations originated
+// from ip within registerCaptchaWindow.
+func (h *AuthHandler) registerIPRequestCount(ctx context.Context, ip string) int {
+	cutoff := time.Now().Add(-h.registerCaptchaWindow).Unix()
+	var count int
+	h.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM register_ip_requests WHERE ip = $1 AND registered_at > $2`,
+		ip, cutoff,
+	).Scan(&count)
+	return count
+}
+
+// recordRegisterIPRequest inserts a successful registration row for ip.
+func (h *AuthHandler) recordRegisterIPRequest(ctx context.Context, ip string) {
+	h.db.Exec(ctx,
+		`INSERT INTO register_ip_requests (ip, registered_at) VALUES ($1, $2)`,
 		ip, time.Now().Unix(),
 	)
 }
