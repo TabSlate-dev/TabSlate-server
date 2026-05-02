@@ -162,3 +162,34 @@ CREATE TABLE IF NOT EXISTS register_ip_requests (
     registered_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_register_ip_requests ON register_ip_requests(ip, registered_at);
+
+-- ── Sync infrastructure ──────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS user_sync_seq (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    seq     BIGINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS sse_tokens (
+    token      TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sse_tokens_user ON sse_tokens (user_id);
+
+-- Add seq + deleted_at to all synced entity tables
+ALTER TABLE workspaces   ADD COLUMN IF NOT EXISTS seq        BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE workspaces   ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
+ALTER TABLE collections  ADD COLUMN IF NOT EXISTS seq        BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE collections  ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
+ALTER TABLE bookmarks    ADD COLUMN IF NOT EXISTS seq        BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE bookmarks    ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
+ALTER TABLE tags         ADD COLUMN IF NOT EXISTS seq        BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE tags         ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
+
+-- Delta-pull indexes: fetch all changes after a given seq for a user
+CREATE INDEX IF NOT EXISTS idx_workspaces_user_seq  ON workspaces  (user_id, seq);
+CREATE INDEX IF NOT EXISTS idx_collections_user_seq ON collections (user_id, seq);
+CREATE INDEX IF NOT EXISTS idx_bookmarks_user_seq   ON bookmarks   (user_id, seq);
+CREATE INDEX IF NOT EXISTS idx_tags_user_seq        ON tags        (user_id, seq);
