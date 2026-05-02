@@ -72,9 +72,21 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	// ── Collections ───────────────────────────────────────────────────────────
 	for _, col := range req.Entities.Collections {
 		if col.DeletedAt == nil {
-			if err := plan.CheckCollection(ctx, h.db, userID); err != nil {
-				rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "quota_exceeded"})
-				continue
+			userPlan := plan.GetUserPlan(ctx, h.db, userID)
+			limits := plan.Get(userPlan)
+			if limits.MaxCollections != -1 {
+				var count int
+				if err := tx.QueryRow(ctx,
+					`SELECT COUNT(*) FROM collections WHERE user_id = $1 AND deleted_at IS NULL`,
+					userID,
+				).Scan(&count); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+					return
+				}
+				if count >= limits.MaxCollections {
+					rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "quota_exceeded"})
+					continue
+				}
 			}
 		}
 		tag, err := tx.Exec(ctx, `
