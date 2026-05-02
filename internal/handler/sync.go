@@ -170,6 +170,10 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid after_seq"})
 			return
 		}
+		if afterSeq < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "after_seq must be non-negative"})
+			return
+		}
 	}
 
 	var resp model.SyncPullResponse
@@ -193,6 +197,10 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 		}
 		resp.Entities.Workspaces = append(resp.Entities.Workspaces, ws)
 	}
+	if err := wsRows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "workspaces iteration failed"})
+		return
+	}
 
 	// Collections
 	colRows, err := h.db.Query(ctx,
@@ -212,6 +220,10 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 			return
 		}
 		resp.Entities.Collections = append(resp.Entities.Collections, col)
+	}
+	if err := colRows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "collections iteration failed"})
+		return
 	}
 
 	// Bookmarks
@@ -235,6 +247,10 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 		}
 		resp.Entities.Bookmarks = append(resp.Entities.Bookmarks, bm)
 	}
+	if err := bmRows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmarks iteration failed"})
+		return
+	}
 
 	// Tags — model.Tag has no UpdatedAt field; omit updated_at from SELECT
 	tagRows, err := h.db.Query(ctx,
@@ -253,6 +269,10 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 			return
 		}
 		resp.Entities.Tags = append(resp.Entities.Tags, t)
+	}
+	if err := tagRows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tags iteration failed"})
+		return
 	}
 
 	// Ensure slices are not nil in JSON output ([] not null)

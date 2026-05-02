@@ -68,10 +68,14 @@ func (h *SSEHandler) Stream(c *gin.Context) {
 			if !ok {
 				return
 			}
-			fmt.Fprintf(w, "data: {\"seq\":%d}\n\n", seq)
+			if _, err := fmt.Fprintf(w, "data: {\"seq\":%d}\n\n", seq); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-ticker.C:
-			fmt.Fprintf(w, ": ping\n\n")
+			if _, err := fmt.Fprintf(w, ": ping\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-ctx.Done():
 			return
