@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -157,7 +158,119 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	c.JSON(http.StatusOK, model.SyncPushResponse{ServerSeq: seq, Rejected: rejected})
 }
 
-// Pull is a placeholder — full implementation added in Task 7.
+// GET /sync/pull?after_seq=<N>
+// Returns all entities (including soft-deleted) with seq > N for the caller.
 func (h *SyncHandler) Pull(c *gin.Context) {
-	c.JSON(http.StatusNotImplemented, gin.H{"error": "not implemented"})
+	ctx := c.Request.Context()
+	userID := middleware.UserID(c)
+
+	var afterSeq int64
+	if s := c.Query("after_seq"); s != "" {
+		if _, err := fmt.Sscanf(s, "%d", &afterSeq); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid after_seq"})
+			return
+		}
+	}
+
+	var resp model.SyncPullResponse
+
+	// Workspaces
+	wsRows, err := h.db.Query(ctx,
+		`SELECT id, user_id, name, icon, color, position, seq, deleted_at, created_at, updated_at
+         FROM workspaces WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
+		userID, afterSeq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "workspaces query failed"})
+		return
+	}
+	defer wsRows.Close()
+	for wsRows.Next() {
+		var ws model.Workspace
+		if err := wsRows.Scan(&ws.ID, &ws.UserID, &ws.Name, &ws.Icon, &ws.Color, &ws.Position,
+			&ws.Seq, &ws.DeletedAt, &ws.CreatedAt, &ws.UpdatedAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace scan failed"})
+			return
+		}
+		resp.Entities.Workspaces = append(resp.Entities.Workspaces, ws)
+	}
+
+	// Collections
+	colRows, err := h.db.Query(ctx,
+		`SELECT id, user_id, workspace_id, name, icon, position, seq, deleted_at, created_at, updated_at
+         FROM collections WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
+		userID, afterSeq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "collections query failed"})
+		return
+	}
+	defer colRows.Close()
+	for colRows.Next() {
+		var col model.Collection
+		if err := colRows.Scan(&col.ID, &col.UserID, &col.WorkspaceID, &col.Name, &col.Icon, &col.Position,
+			&col.Seq, &col.DeletedAt, &col.CreatedAt, &col.UpdatedAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "collection scan failed"})
+			return
+		}
+		resp.Entities.Collections = append(resp.Entities.Collections, col)
+	}
+
+	// Bookmarks
+	bmRows, err := h.db.Query(ctx,
+		`SELECT id, user_id, collection_id, title, url, favicon_url, description,
+                is_favorite, is_archived, is_trashed, position, seq, deleted_at, created_at, updated_at
+         FROM bookmarks WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
+		userID, afterSeq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmarks query failed"})
+		return
+	}
+	defer bmRows.Close()
+	for bmRows.Next() {
+		var bm model.Bookmark
+		if err := bmRows.Scan(&bm.ID, &bm.UserID, &bm.CollectionID, &bm.Title, &bm.URL, &bm.FaviconURL,
+			&bm.Description, &bm.IsFavorite, &bm.IsArchived, &bm.IsTrashed, &bm.Position,
+			&bm.Seq, &bm.DeletedAt, &bm.CreatedAt, &bm.UpdatedAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark scan failed"})
+			return
+		}
+		resp.Entities.Bookmarks = append(resp.Entities.Bookmarks, bm)
+	}
+
+	// Tags — model.Tag has no UpdatedAt field; omit updated_at from SELECT
+	tagRows, err := h.db.Query(ctx,
+		`SELECT id, user_id, name, color, seq, deleted_at
+         FROM tags WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
+		userID, afterSeq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tags query failed"})
+		return
+	}
+	defer tagRows.Close()
+	for tagRows.Next() {
+		var t model.Tag
+		if err := tagRows.Scan(&t.ID, &t.UserID, &t.Name, &t.Color, &t.Seq, &t.DeletedAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "tag scan failed"})
+			return
+		}
+		resp.Entities.Tags = append(resp.Entities.Tags, t)
+	}
+
+	// Ensure slices are not nil in JSON output ([] not null)
+	if resp.Entities.Workspaces == nil {
+		resp.Entities.Workspaces = []model.Workspace{}
+	}
+	if resp.Entities.Collections == nil {
+		resp.Entities.Collections = []model.Collection{}
+	}
+	if resp.Entities.Bookmarks == nil {
+		resp.Entities.Bookmarks = []model.Bookmark{}
+	}
+	if resp.Entities.Tags == nil {
+		resp.Entities.Tags = []model.Tag{}
+	}
+
+	serverSeq, _ := currentSeq(ctx, h.db, userID)
+	resp.ServerSeq = serverSeq
+
+	c.JSON(http.StatusOK, resp)
 }
