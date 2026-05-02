@@ -34,14 +34,16 @@ type Subscription struct {
 
 // Workspace represents a logical workspace grouping collections.
 type Workspace struct {
-	ID        string `json:"id"`
-	UserID    string `json:"user_id"`
-	Name      string `json:"name"`
-	Icon      string `json:"icon,omitempty"`
-	Color     string `json:"color,omitempty"`
-	Position  int    `json:"position"`
-	CreatedAt int64  `json:"created_at"`
-	UpdatedAt int64  `json:"updated_at"`
+	ID        string  `json:"id"`
+	UserID    string  `json:"user_id"`
+	Name      string  `json:"name"`
+	Icon      string  `json:"icon,omitempty"`
+	Color     string  `json:"color,omitempty"`
+	Position  int     `json:"position"`
+	CreatedAt int64   `json:"created_at"`
+	UpdatedAt int64   `json:"updated_at"`
+	Seq       int64   `json:"seq"`
+	DeletedAt *int64  `json:"deleted_at,omitempty"`
 }
 
 // Collection is a folder of bookmarks inside a workspace.
@@ -54,6 +56,8 @@ type Collection struct {
 	Position    int     `json:"position"`
 	CreatedAt   int64   `json:"created_at"`
 	UpdatedAt   int64   `json:"updated_at"`
+	Seq         int64   `json:"seq"`
+	DeletedAt   *int64  `json:"deleted_at,omitempty"`
 }
 
 // Bookmark is a saved URL.
@@ -71,14 +75,18 @@ type Bookmark struct {
 	Position     int     `json:"position"`
 	CreatedAt    int64   `json:"created_at"`
 	UpdatedAt    int64   `json:"updated_at"`
+	Seq          int64   `json:"seq"`
+	DeletedAt    *int64  `json:"deleted_at,omitempty"`
 }
 
 // Tag is a label that can be applied to bookmarks.
 type Tag struct {
-	ID     string `json:"id"`
-	UserID string `json:"user_id"`
-	Name   string `json:"name"`
-	Color  string `json:"color,omitempty"`
+	ID        string `json:"id"`
+	UserID    string `json:"user_id"`
+	Name      string `json:"name"`
+	Color     string `json:"color,omitempty"`
+	Seq       int64  `json:"seq"`
+	DeletedAt *int64 `json:"deleted_at,omitempty"`
 }
 
 // ─── Request / Response DTOs ──────────────────────────────────────────────────
@@ -160,17 +168,36 @@ type TagRequest struct {
 
 // ─── Sync DTOs ────────────────────────────────────────────────────────────────
 
-type SyncPush struct {
+// SyncEntities is the common shape for push requests and pull responses.
+type SyncEntities struct {
 	Workspaces  []Workspace  `json:"workspaces"`
 	Collections []Collection `json:"collections"`
 	Bookmarks   []Bookmark   `json:"bookmarks"`
 	Tags        []Tag        `json:"tags"`
 }
 
-type SyncResponse struct {
-	Workspaces  []Workspace  `json:"workspaces"`
-	Collections []Collection `json:"collections"`
-	Bookmarks   []Bookmark   `json:"bookmarks"`
-	Tags        []Tag        `json:"tags"`
-	ServerTime  int64        `json:"server_time"`
+type SyncPushRequest struct {
+	Entities SyncEntities `json:"entities"`
+}
+
+type SyncPushResponse struct {
+	ServerSeq int64      `json:"server_seq"`
+	Rejected  []Rejected `json:"rejected"`
+}
+
+type Rejected struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"` // "stale" | "quota_exceeded"
+}
+
+type SyncPullResponse struct {
+	Entities  SyncEntities `json:"entities"`
+	ServerSeq int64        `json:"server_seq"`
+}
+
+// SSEToken is a short-lived token for authenticating the SSE stream.
+type SSEToken struct {
+	Token     string `json:"token"`
+	UserID    string `json:"-"`
+	ExpiresAt int64  `json:"-"`
 }
