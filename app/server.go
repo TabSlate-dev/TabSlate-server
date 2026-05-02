@@ -196,10 +196,10 @@ func (s *Server) setupRoutes() {
 
 		api.POST("/auth/sse-token", authH.IssueSSEToken)
 
-		api.POST("/sync/push", middleware.RateLimitByIP(syncPushRL), func(c *gin.Context) {
+		api.POST("/sync/push", func(c *gin.Context) {
 			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 512*1024)
 			c.Next()
-		}, syncH.Push)
+		}, middleware.RateLimitByIP(syncPushRL), syncH.Push)
 		api.GET("/sync/pull", middleware.RateLimitByIP(syncPullRL), syncH.Pull)
 
 		// Billing — behaviour varies by provider (OSS vs Cloud)
