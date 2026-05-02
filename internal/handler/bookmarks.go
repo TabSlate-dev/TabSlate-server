@@ -156,7 +156,11 @@ func (h *BookmarkHandler) Update(c *gin.Context) {
 		req.CollectionID, req.Title, req.URL, req.FaviconURL, req.Description,
 		req.IsFavorite, req.IsArchived, req.IsTrashed, req.Position, seq, now, id, userID,
 	)
-	if err != nil || tag.RowsAffected() == 0 {
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update bookmark"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "bookmark not found"})
 		return
 	}
@@ -194,7 +198,11 @@ func (h *BookmarkHandler) Delete(c *gin.Context) {
 		`UPDATE bookmarks SET deleted_at=$1, seq=$2, updated_at=$1
 		 WHERE id=$3 AND user_id=$4 AND deleted_at IS NULL`,
 		now, seq, id, userID)
-	if err != nil || tag.RowsAffected() == 0 {
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete bookmark"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "bookmark not found"})
 		return
 	}

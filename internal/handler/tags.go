@@ -70,9 +70,10 @@ func (h *TagHandler) Create(c *gin.Context) {
 		return
 	}
 
+	now := time.Now().UnixMilli()
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO tags (id, user_id, name, color, seq) VALUES ($1,$2,$3,$4,$5)`,
-		id, userID, req.Name, req.Color, seq,
+		`INSERT INTO tags (id, user_id, name, color, seq, updated_at) VALUES ($1,$2,$3,$4,$5,$6)`,
+		id, userID, req.Name, req.Color, seq, now,
 	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create tag"})
 		return
@@ -113,10 +114,14 @@ func (h *TagHandler) Update(c *gin.Context) {
 	}
 
 	tag, err := tx.Exec(ctx,
-		`UPDATE tags SET name=$1, color=$2, seq=$3 WHERE id=$4 AND user_id=$5 AND deleted_at IS NULL`,
-		req.Name, req.Color, seq, id, userID,
+		`UPDATE tags SET name=$1, color=$2, seq=$3, updated_at=$4 WHERE id=$5 AND user_id=$6 AND deleted_at IS NULL`,
+		req.Name, req.Color, seq, time.Now().UnixMilli(), id, userID,
 	)
-	if err != nil || tag.RowsAffected() == 0 {
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update tag"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tag not found"})
 		return
 	}
@@ -151,9 +156,13 @@ func (h *TagHandler) Delete(c *gin.Context) {
 	}
 
 	tag, err := tx.Exec(ctx,
-		`UPDATE tags SET deleted_at=$1, seq=$2 WHERE id=$3 AND user_id=$4 AND deleted_at IS NULL`,
+		`UPDATE tags SET deleted_at=$1, seq=$2, updated_at=$1 WHERE id=$3 AND user_id=$4 AND deleted_at IS NULL`,
 		now, seq, id, userID)
-	if err != nil || tag.RowsAffected() == 0 {
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete tag"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tag not found"})
 		return
 	}

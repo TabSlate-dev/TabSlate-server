@@ -124,7 +124,11 @@ func (h *WorkspaceHandler) Update(c *gin.Context) {
 		`UPDATE workspaces SET name=$1, icon=$2, color=$3, position=$4, seq=$5, updated_at=$6
 		 WHERE id=$7 AND user_id=$8 AND deleted_at IS NULL`,
 		req.Name, req.Icon, req.Color, req.Position, seq, now, id, userID)
-	if err != nil || tag.RowsAffected() == 0 {
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update workspace"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "workspace not found"})
 		return
 	}
@@ -162,7 +166,11 @@ func (h *WorkspaceHandler) Delete(c *gin.Context) {
 		`UPDATE workspaces SET deleted_at=$1, seq=$2, updated_at=$1
 		 WHERE id=$3 AND user_id=$4 AND deleted_at IS NULL`,
 		now, seq, id, userID)
-	if err != nil || tag.RowsAffected() == 0 {
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete workspace"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "workspace not found"})
 		return
 	}

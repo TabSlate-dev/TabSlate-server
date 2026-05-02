@@ -154,7 +154,11 @@ func (h *CollectionHandler) Update(c *gin.Context) {
 		`UPDATE collections SET workspace_id=$1, name=$2, icon=$3, position=$4, seq=$5, updated_at=$6
 		 WHERE id=$7 AND user_id=$8 AND deleted_at IS NULL`,
 		req.WorkspaceID, req.Name, req.Icon, req.Position, seq, now, id, userID)
-	if err != nil || tag.RowsAffected() == 0 {
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update collection"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "collection not found"})
 		return
 	}
@@ -192,7 +196,11 @@ func (h *CollectionHandler) Delete(c *gin.Context) {
 		`UPDATE collections SET deleted_at=$1, seq=$2, updated_at=$1
 		 WHERE id=$3 AND user_id=$4 AND deleted_at IS NULL`,
 		now, seq, id, userID)
-	if err != nil || tag.RowsAffected() == 0 {
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete collection"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "collection not found"})
 		return
 	}

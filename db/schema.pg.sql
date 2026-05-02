@@ -187,6 +187,7 @@ ALTER TABLE bookmarks    ADD COLUMN IF NOT EXISTS seq        BIGINT NOT NULL DEF
 ALTER TABLE bookmarks    ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
 ALTER TABLE tags         ADD COLUMN IF NOT EXISTS seq        BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE tags         ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
+ALTER TABLE tags         ADD COLUMN IF NOT EXISTS updated_at BIGINT NOT NULL DEFAULT 0;
 
 -- Delta-pull indexes: fetch all changes after a given seq for a user
 CREATE INDEX IF NOT EXISTS idx_workspaces_user_seq  ON workspaces  (user_id, seq);
