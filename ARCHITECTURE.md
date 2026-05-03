@@ -173,7 +173,7 @@ currentSeq(ctx, d *db.DB, userID) (int64, error)
 | `sse_tokens` | token PK, user_id, expires_at BIGINT | 30s 单次 SSE 鉴权令牌 |
 | `workspaces` | id, user_id, seq, deleted_at | 含同步字段 |
 | `collections` | id, user_id, workspace_id, seq, deleted_at | 含同步字段 |
-| `bookmarks` | id, user_id, collection_id, seq, deleted_at | 含同步字段 |
+| `bookmarks` | id, user_id, collection_id, seq, deleted_at, tag_ids text[] | 含同步字段；`tag_ids` 存书签关联的 Tag ID 数组 |
 | `tags` | id, user_id, seq, deleted_at, updated_at | 含同步字段（updated_at 用于 LWW） |
 | `refresh_tokens` | token_hash, user_id, expires_at | SHA-256 哈希存储，使用后轮换 |
 

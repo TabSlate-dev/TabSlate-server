@@ -10,11 +10,13 @@ import (
 
 // incrementSeq atomically increments the per-user sync sequence counter inside
 // an existing transaction and returns the new seq value.
-// The user_sync_seq row must already exist (created during registration).
+// Creates the row on first use so users registered before the sync feature work correctly.
 func incrementSeq(ctx context.Context, tx pgx.Tx, userID string) (int64, error) {
 	var seq int64
 	err := tx.QueryRow(ctx,
-		`UPDATE user_sync_seq SET seq = seq + 1 WHERE user_id = $1 RETURNING seq`,
+		`INSERT INTO user_sync_seq (user_id, seq) VALUES ($1, 1)
+		 ON CONFLICT (user_id) DO UPDATE SET seq = user_sync_seq.seq + 1
+		 RETURNING seq`,
 		userID,
 	).Scan(&seq)
 	if err != nil {

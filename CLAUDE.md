@@ -243,3 +243,4 @@ h.db.QueryRowContext(ctx, h.db.Rebind(`SELECT * FROM users WHERE email = ?`), em
 - **SSE Hub 进程级**：`globalHub` 是进程内 in-memory 单例，水平扩展时需换成 Redis pub/sub 或类似机制；当前 OSS 部署为单进程，无此问题。
 - **软删除传播**：所有同步实体的删除操作写 `deleted_at = unix_ms`，Pull 响应含墓碑（`deleted_at != NULL`），客户端负责从本地移除对应记录；直接 `DELETE` 不会传播到其他设备。
 - **Tag 模型缺少 UpdatedAt**：`model.Tag` 结构体无 `UpdatedAt` 字段，Pull handler 的 tag SELECT 因此只取 6 列（无 `updated_at`）；LWW 通过 `seq` 而非 `updated_at` 实现。
+- **Bookmark tag_ids**：`bookmarks` 表有 `tag_ids text[] NOT NULL DEFAULT '{}'` 列，存储该书签关联的 Tag ID 数组。`model.Bookmark.TagIDs []string` 对应此列；Push upsert 和 Pull SELECT 均包含 `tag_ids`；pgx 原生支持 `[]string ↔ text[]` 扫描，无需额外包。

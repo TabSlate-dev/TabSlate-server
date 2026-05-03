@@ -69,14 +69,15 @@ type Bookmark struct {
 	URL          string  `json:"url"`
 	FaviconURL   string  `json:"favicon_url,omitempty"`
 	Description  string  `json:"description,omitempty"`
-	IsFavorite   bool    `json:"is_favorite"`
-	IsArchived   bool    `json:"is_archived"`
-	IsTrashed    bool    `json:"is_trashed"`
-	Position     int     `json:"position"`
-	CreatedAt    int64   `json:"created_at"`
-	UpdatedAt    int64   `json:"updated_at"`
-	Seq          int64   `json:"seq"`
-	DeletedAt    *int64  `json:"deleted_at,omitempty"`
+	IsFavorite   bool     `json:"is_favorite"`
+	IsArchived   bool     `json:"is_archived"`
+	IsTrashed    bool     `json:"is_trashed"`
+	TagIDs       []string `json:"tag_ids"`
+	Position     int      `json:"position"`
+	CreatedAt    int64    `json:"created_at"`
+	UpdatedAt    int64    `json:"updated_at"`
+	Seq          int64    `json:"seq"`
+	DeletedAt    *int64   `json:"deleted_at,omitempty"`
 }
 
 // Tag is a label that can be applied to bookmarks.

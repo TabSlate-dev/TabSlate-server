@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -102,12 +103,30 @@ func (s *Server) SyncSubscription(ctx context.Context, userID, planCode, status 
 	return nil
 }
 
-// Run starts the HTTP server and blocks until it exits.
+// Run starts the HTTP server and blocks until the process context is cancelled.
 func (s *Server) Run() {
 	addr := ":" + s.cfg.Port
+	ln, err := net.Listen("tcp4", addr)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+
+	httpSrv := &http.Server{Handler: s.router}
 	log.Printf("TabSlate server listening on %s", addr)
-	if err := s.router.Run(addr); err != nil {
-		log.Fatal(err)
+
+	go func() {
+		if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("serve: %v", err)
+		}
+	}()
+
+	<-s.ctx.Done()
+	log.Println("shutting down...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("server shutdown: %v", err)
 	}
 }
 

@@ -108,16 +108,20 @@ func (h *SyncHandler) Push(c *gin.Context) {
 
 	// ── Bookmarks ─────────────────────────────────────────────────────────────
 	for _, bm := range req.Entities.Bookmarks {
+		tagIDs := bm.TagIDs
+		if tagIDs == nil {
+			tagIDs = []string{}
+		}
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO bookmarks (id, user_id, collection_id, title, url, favicon_url, description,
-			                       is_favorite, is_archived, is_trashed, position, seq, deleted_at, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)
+			                       is_favorite, is_archived, is_trashed, position, seq, deleted_at, created_at, updated_at, tag_ids)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15)
 			ON CONFLICT (id) DO UPDATE
 			  SET collection_id=$3, title=$4, url=$5, favicon_url=$6, description=$7,
-			      is_favorite=$8, is_archived=$9, is_trashed=$10, position=$11, seq=$12, deleted_at=$13, updated_at=$14
+			      is_favorite=$8, is_archived=$9, is_trashed=$10, position=$11, seq=$12, deleted_at=$13, updated_at=$14, tag_ids=$15
 			WHERE bookmarks.user_id = $2 AND bookmarks.updated_at < $14`,
 			bm.ID, userID, bm.CollectionID, bm.Title, bm.URL, bm.FaviconURL, bm.Description,
-			bm.IsFavorite, bm.IsArchived, bm.IsTrashed, bm.Position, seq, bm.DeletedAt, now)
+			bm.IsFavorite, bm.IsArchived, bm.IsTrashed, bm.Position, seq, bm.DeletedAt, now, tagIDs)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark upsert failed"})
 			return
@@ -229,7 +233,7 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 	// Bookmarks
 	bmRows, err := h.db.Query(ctx,
 		`SELECT id, user_id, collection_id, title, url, favicon_url, description,
-                is_favorite, is_archived, is_trashed, position, seq, deleted_at, created_at, updated_at
+                is_favorite, is_archived, is_trashed, tag_ids, position, seq, deleted_at, created_at, updated_at
          FROM bookmarks WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
 		userID, afterSeq)
 	if err != nil {
@@ -240,10 +244,13 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 	for bmRows.Next() {
 		var bm model.Bookmark
 		if err := bmRows.Scan(&bm.ID, &bm.UserID, &bm.CollectionID, &bm.Title, &bm.URL, &bm.FaviconURL,
-			&bm.Description, &bm.IsFavorite, &bm.IsArchived, &bm.IsTrashed, &bm.Position,
+			&bm.Description, &bm.IsFavorite, &bm.IsArchived, &bm.IsTrashed, &bm.TagIDs, &bm.Position,
 			&bm.Seq, &bm.DeletedAt, &bm.CreatedAt, &bm.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark scan failed"})
 			return
+		}
+		if bm.TagIDs == nil {
+			bm.TagIDs = []string{}
 		}
 		resp.Entities.Bookmarks = append(resp.Entities.Bookmarks, bm)
 	}
