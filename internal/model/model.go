@@ -58,6 +58,7 @@ type Collection struct {
 	UpdatedAt   int64   `json:"updated_at"`
 	Seq         int64   `json:"seq"`
 	DeletedAt   *int64  `json:"deleted_at,omitempty"`
+	ArchivedAt  *int64  `json:"archived_at,omitempty"`
 }
 
 // Bookmark is a saved URL.

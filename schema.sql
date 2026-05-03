@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS collections (
     name         TEXT NOT NULL,
     icon         TEXT,
     position     INTEGER NOT NULL DEFAULT 0,
+    seq          INTEGER NOT NULL DEFAULT 0,
+    deleted_at   INTEGER,
+    archived_at  INTEGER,
     created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
     updated_at   INTEGER NOT NULL DEFAULT (unixepoch())
 );
