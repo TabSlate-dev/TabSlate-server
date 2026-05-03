@@ -238,7 +238,7 @@ h.db.QueryRowContext(ctx, h.db.Rebind(`SELECT * FROM users WHERE email = ?`), em
 - **Cloud 扩展点**：在 `billing.Provider` 接口之外，Cloud 还可以实现 `billing.WebhookHandler` 接口，通过 `server.RegisterWebhook` 注册路由
 - **Captcha Widget**：`GET /captcha/widget` 提供一个 HTML 页面（由 `internal/handler/captcha.go` 提供），Chrome MV3 扩展将其嵌入 `<iframe>`，页面从配置的 `PROSOPO_BUNDLE_URL` 加载 Prosopo JS bundle，验证完成后通过 `postMessage` 将 token 传回父页面。CSP 由服务端动态构建，`script-src`/`connect-src` 均基于 `bundleOrigin`，支持官方 CDN 和自部署两种场景。
 - **OTP 安全存储**：`verification_token`（邮箱验证）和 `reset_otp_hash`（密码重置）均存 SHA-256(code)，明文 OTP 仅在发送邮件时使用一次后丢弃。`verification_attempts` / `reset_attempts` 计数器在 5 次错误后自动清空 OTP 字段，重发新 OTP 时计数器清零。
-- **同步事务要求**：`SyncHandler.Push` 必须在单个 pgx 事务中完成配额检查 + 所有 upsert + `incrementSeq`，禁止将配额检查移到事务外（TOCTOU 竞争会导致超配额）。
+- **同步事务要求**：`SyncHandler.Push` 必须在单个 pgx 事务中完成配额检查 + 所有 upsert + `incrementSeq`，禁止将配额检查移到事务外（TOCTOU 竞争会导致超配额）。配额 SQL 条件为 `deleted_at IS NULL AND archived_at IS NULL`——归档集合不计入配额。
 - **SSE token 单次消耗**：`sse_tokens` 表的 token 在 `SSEHandler.Stream` 开始时立即 `DELETE ... RETURNING`，若过期或不存在返回 401；token 有效期 30 秒，由 `POST /auth/sse-token` 签发（需 Bearer JWT）。
 - **SSE Hub 进程级**：`globalHub` 是进程内 in-memory 单例，水平扩展时需换成 Redis pub/sub 或类似机制；当前 OSS 部署为单进程，无此问题。
 - **软删除传播**：所有同步实体的删除操作写 `deleted_at = unix_ms`，Pull 响应含墓碑（`deleted_at != NULL`），客户端负责从本地移除对应记录；直接 `DELETE` 不会传播到其他设备。
