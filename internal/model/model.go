@@ -4,15 +4,18 @@ package model
 type Plan string
 
 const (
-	PlanFree Plan = "free"
-	PlanPro  Plan = "pro"
+	PlanFree       Plan = "free"
+	PlanPro        Plan = "pro"
+	PlanEnterprise Plan = "enterprise"
 )
 
 // User represents an authenticated user.
 type User struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Email        string `json:"email"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Email      string `json:"email"`
+	IsVerified bool   `json:"is_verified"`
+
 	PasswordHash string `json:"-"`
 	CreatedAt    int64  `json:"created_at"`
 	UpdatedAt    int64  `json:"updated_at"`
@@ -20,13 +23,13 @@ type User struct {
 
 // Subscription holds a user's plan info.
 type Subscription struct {
-	ID        string  `json:"id"`
-	UserID    string  `json:"user_id"`
-	Plan      Plan    `json:"plan"`
-	Status    string  `json:"status"`
-	ExpiresAt *int64  `json:"expires_at"`
-	CreatedAt int64   `json:"created_at"`
-	UpdatedAt int64   `json:"updated_at"`
+	ID        string `json:"id"`
+	UserID    string `json:"user_id"`
+	Plan      Plan   `json:"plan"`
+	Status    string `json:"status"`
+	ExpiresAt *int64 `json:"expires_at"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
 }
 
 // Workspace represents a logical workspace grouping collections.
@@ -81,14 +84,37 @@ type Tag struct {
 // ─── Request / Response DTOs ──────────────────────────────────────────────────
 
 type RegisterRequest struct {
-	Name     string `json:"name"     binding:"required,min=1,max=100"`
-	Email    string `json:"email"    binding:"required,email"`
-	Password string `json:"password" binding:"required,min=8"`
+	Name         string `json:"name"          binding:"required,min=1,max=100"`
+	Email        string `json:"email"         binding:"required,email"`
+	Password     string `json:"password"      binding:"required,min=10"`
+	CaptchaToken string `json:"captcha_token"`
 }
 
 type LoginRequest struct {
-	Email    string `json:"email"    binding:"required,email"`
-	Password string `json:"password" binding:"required"`
+	Email        string `json:"email"         binding:"required,email"`
+	Password     string `json:"password"      binding:"required"`
+	CaptchaToken string `json:"captcha_token"`
+}
+
+type ResendVerificationRequest struct {
+	Email        string `json:"email"         binding:"required,email"`
+	CaptchaToken string `json:"captcha_token"`
+}
+
+type VerifyEmailOTPRequest struct {
+	Email string `json:"email" binding:"required,email"`
+	Code  string `json:"code"  binding:"required,min=6,max=6"`
+}
+
+type ForgotPasswordRequest struct {
+	Email        string `json:"email"         binding:"required,email"`
+	CaptchaToken string `json:"captcha_token"`
+}
+
+type ResetPasswordRequest struct {
+	Email       string `json:"email"        binding:"required,email"`
+	Code        string `json:"code"         binding:"required,min=6,max=6"`
+	NewPassword string `json:"new_password" binding:"required,min=10"`
 }
 
 type AuthResponse struct {
@@ -134,7 +160,6 @@ type TagRequest struct {
 
 // ─── Sync DTOs ────────────────────────────────────────────────────────────────
 
-// SyncPush is the payload the client sends with local changes.
 type SyncPush struct {
 	Workspaces  []Workspace  `json:"workspaces"`
 	Collections []Collection `json:"collections"`
@@ -142,7 +167,6 @@ type SyncPush struct {
 	Tags        []Tag        `json:"tags"`
 }
 
-// SyncResponse is what the server sends back: server-side changes since `since`.
 type SyncResponse struct {
 	Workspaces  []Workspace  `json:"workspaces"`
 	Collections []Collection `json:"collections"`

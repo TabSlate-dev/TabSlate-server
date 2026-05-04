@@ -1,30 +1,31 @@
 package handler
 
 import (
-	"database/sql"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/lieutenant/tabmaster/internal/middleware"
-	"github.com/lieutenant/tabmaster/internal/model"
-	"github.com/lieutenant/tabmaster/internal/plan"
+	"github.com/tabslate/server/db"
+	"github.com/tabslate/server/internal/middleware"
+	"github.com/tabslate/server/internal/model"
+	"github.com/tabslate/server/internal/plan"
 )
 
-type WorkspaceHandler struct{ db *sql.DB }
+type WorkspaceHandler struct{ db *db.DB }
 
-func NewWorkspaceHandler(db *sql.DB) *WorkspaceHandler { return &WorkspaceHandler{db: db} }
+func NewWorkspaceHandler(d *db.DB) *WorkspaceHandler { return &WorkspaceHandler{db: d} }
 
 // GET /workspaces
 func (h *WorkspaceHandler) List(c *gin.Context) {
+	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
-	rows, err := h.db.Query(
+
+	rows, err := h.db.Query(ctx,
 		`SELECT id, user_id, name, icon, color, position, created_at, updated_at
-		   FROM workspaces WHERE user_id = ? ORDER BY position ASC`, userID,
-	)
+		 FROM workspaces WHERE user_id = $1 ORDER BY position ASC`, userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list workspaces"})
 		return
 	}
 	defer rows.Close()
@@ -40,8 +41,10 @@ func (h *WorkspaceHandler) List(c *gin.Context) {
 
 // POST /workspaces
 func (h *WorkspaceHandler) Create(c *gin.Context) {
+	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
-	if err := plan.CheckWorkspace(h.db, userID); err != nil {
+
+	if err := plan.CheckWorkspace(ctx, h.db, userID); err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
@@ -58,13 +61,12 @@ func (h *WorkspaceHandler) Create(c *gin.Context) {
 		Name: req.Name, Icon: req.Icon, Color: req.Color, Position: req.Position,
 		CreatedAt: now, UpdatedAt: now,
 	}
-	_, err := h.db.Exec(
+	if _, err := h.db.Exec(ctx,
 		`INSERT INTO workspaces (id, user_id, name, icon, color, position, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
 		w.ID, w.UserID, w.Name, w.Icon, w.Color, w.Position, w.CreatedAt, w.UpdatedAt,
-	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create workspace"})
 		return
 	}
 	c.JSON(http.StatusCreated, w)
@@ -72,6 +74,7 @@ func (h *WorkspaceHandler) Create(c *gin.Context) {
 
 // PUT /workspaces/:id
 func (h *WorkspaceHandler) Update(c *gin.Context) {
+	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 	id := c.Param("id")
 
@@ -82,16 +85,16 @@ func (h *WorkspaceHandler) Update(c *gin.Context) {
 	}
 
 	now := time.Now().Unix()
-	res, err := h.db.Exec(
-		`UPDATE workspaces SET name=?, icon=?, color=?, position=?, updated_at=?
-		  WHERE id=? AND user_id=?`,
+	tag, err := h.db.Exec(ctx,
+		`UPDATE workspaces SET name=$1, icon=$2, color=$3, position=$4, updated_at=$5
+		 WHERE id=$6 AND user_id=$7`,
 		req.Name, req.Icon, req.Color, req.Position, now, id, userID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update workspace"})
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if tag.RowsAffected() == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "workspace not found"})
 		return
 	}
@@ -100,14 +103,16 @@ func (h *WorkspaceHandler) Update(c *gin.Context) {
 
 // DELETE /workspaces/:id
 func (h *WorkspaceHandler) Delete(c *gin.Context) {
+	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 	id := c.Param("id")
-	res, err := h.db.Exec(`DELETE FROM workspaces WHERE id=? AND user_id=?`, id, userID)
+
+	tag, err := h.db.Exec(ctx, `DELETE FROM workspaces WHERE id=$1 AND user_id=$2`, id, userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete workspace"})
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if tag.RowsAffected() == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "workspace not found"})
 		return
 	}

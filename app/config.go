@@ -1,0 +1,146 @@
+package app
+
+import (
+	"log"
+	"os"
+	"strconv"
+	"time"
+)
+
+// Config holds all runtime configuration read from environment variables.
+type Config struct {
+	// DatabaseURL is the DSN for the primary database.
+	// Use a postgres:// URL for PostgreSQL or a libsql:// / file: URL for Turso/SQLite.
+	DatabaseURL string
+
+	// JWTSecret is the HMAC secret used to sign access tokens.
+	JWTSecret string
+
+	// Port is the TCP port the HTTP server listens on (default "8080").
+	Port string
+
+	// GinMode sets the Gin framework mode ("debug", "release", "test").
+	GinMode string
+
+	// LicenseKey is the optional OSS License JWT. Leave empty for free-tier mode.
+	LicenseKey string
+
+	// ── Prosopo Captcha ──────────────────────────────────────────────────────
+	// ProsopoSecret is the site secret for server-side verification.
+	// Leave empty to disable captcha verification entirely.
+	ProsopoSecret string
+
+	// ProsopoServerURL is the verification endpoint. Defaults to the official
+	// Prosopo API but can be overridden for self-hosted deployments.
+	ProsopoServerURL string
+
+	// ProsopoBundleURL is the URL of the procaptcha JS bundle served to the
+	// browser widget iframe. Defaults to the official Prosopo CDN. Override for
+	// self-hosted Prosopo deployments.
+	ProsopoBundleURL string
+
+	// ── Email ────────────────────────────────────────────────────────────────
+	// MailProvider selects the email backend: "smtp" or "resend".
+	// Leave empty to disable email verification (all users auto-verified).
+	MailProvider string
+
+	// SMTP settings (used when MailProvider == "smtp")
+	SMTPHost     string
+	SMTPPort     string
+	SMTPUser     string
+	SMTPPassword string
+	SMTPFrom     string
+
+	// Resend settings (used when MailProvider == "resend")
+	ResendAPIKey string
+	ResendFrom   string
+
+	// ── Registration captcha ─────────────────────────────────────────────────
+	// RegisterCaptchaThreshold is the number of successful registrations from a
+	// single IP within RegisterCaptchaWindow before captcha is required.
+	// Set to 0 to always require captcha. Defaults to 3.
+	RegisterCaptchaThreshold int
+
+	// RegisterCaptchaWindow is the look-back period for per-IP registration
+	// counting. Accepts any Go duration string (e.g. "24h", "1h"). Defaults to 24h.
+	RegisterCaptchaWindow time.Duration
+
+	// OTPCaptchaThreshold is the number of OTP email requests from a single IP
+	// within OTPCaptchaWindow before captcha is required on resend/forgot-password.
+	// Set to 0 to always require captcha. Defaults to 5.
+	OTPCaptchaThreshold int
+
+	// OTPCaptchaWindow is the look-back period for per-IP OTP request counting.
+	// Accepts any Go duration string. Defaults to 15m.
+	OTPCaptchaWindow time.Duration
+}
+
+// LoadConfig reads configuration from environment variables and fatals on any
+// required variable that is missing.
+func LoadConfig() *Config {
+	return &Config{
+		DatabaseURL: mustEnv("DATABASE_URL"),
+		JWTSecret:   mustEnv("JWT_SECRET"),
+		Port:        envOr("PORT", "8080"),
+		GinMode:     os.Getenv("GIN_MODE"),
+		LicenseKey:  os.Getenv("LICENSE_KEY"),
+
+		// Prosopo
+		ProsopoSecret:    os.Getenv("PROSOPO_SECRET"),
+		ProsopoServerURL: envOr("PROSOPO_SERVER_URL", "https://api.prosopo.io/siteverify"),
+		ProsopoBundleURL: envOr("PROSOPO_BUNDLE_URL", "https://js.prosopo.io/js/procaptcha.bundle.js"),
+
+		// Email
+		MailProvider:  os.Getenv("MAIL_PROVIDER"),
+		SMTPHost:      os.Getenv("SMTP_HOST"),
+		SMTPPort:      envOr("SMTP_PORT", "587"),
+		SMTPUser:      os.Getenv("SMTP_USER"),
+		SMTPPassword:  os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:      os.Getenv("SMTP_FROM"),
+		ResendAPIKey:  os.Getenv("RESEND_API_KEY"),
+		ResendFrom:    os.Getenv("RESEND_FROM"),
+
+		// Registration captcha
+		RegisterCaptchaThreshold: envInt("REGISTER_CAPTCHA_THRESHOLD", 3),
+		RegisterCaptchaWindow:    envDuration("REGISTER_CAPTCHA_WINDOW", 24*time.Hour),
+
+		// OTP resend captcha
+		OTPCaptchaThreshold: envInt("OTP_CAPTCHA_THRESHOLD", 5),
+		OTPCaptchaWindow:    envDuration("OTP_CAPTCHA_WINDOW", 15*time.Minute),
+	}
+}
+
+func mustEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		log.Fatalf("required env var %s is not set", key)
+	}
+	return v
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+		log.Printf("invalid integer for %s, using default %d", key, fallback)
+	}
+	return fallback
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		log.Printf("invalid duration for %s, using default %s", key, fallback)
+	}
+	return fallback
+}

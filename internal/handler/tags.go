@@ -1,26 +1,28 @@
 package handler
 
 import (
-	"database/sql"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/lieutenant/tabmaster/internal/middleware"
-	"github.com/lieutenant/tabmaster/internal/model"
-	"github.com/lieutenant/tabmaster/internal/plan"
+	"github.com/tabslate/server/db"
+	"github.com/tabslate/server/internal/middleware"
+	"github.com/tabslate/server/internal/model"
+	"github.com/tabslate/server/internal/plan"
 )
 
-type TagHandler struct{ db *sql.DB }
+type TagHandler struct{ db *db.DB }
 
-func NewTagHandler(db *sql.DB) *TagHandler { return &TagHandler{db: db} }
+func NewTagHandler(d *db.DB) *TagHandler { return &TagHandler{db: d} }
 
 // GET /tags
 func (h *TagHandler) List(c *gin.Context) {
+	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
-	rows, err := h.db.Query(`SELECT id, user_id, name, color FROM tags WHERE user_id=?`, userID)
+
+	rows, err := h.db.Query(ctx, `SELECT id, user_id, name, color FROM tags WHERE user_id=$1`, userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list tags"})
 		return
 	}
 	defer rows.Close()
@@ -36,8 +38,10 @@ func (h *TagHandler) List(c *gin.Context) {
 
 // POST /tags
 func (h *TagHandler) Create(c *gin.Context) {
+	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
-	if err := plan.CheckTag(h.db, userID); err != nil {
+
+	if err := plan.CheckTag(ctx, h.db, userID); err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
@@ -49,10 +53,11 @@ func (h *TagHandler) Create(c *gin.Context) {
 	}
 
 	t := model.Tag{ID: uuid.NewString(), UserID: userID, Name: req.Name, Color: req.Color}
-	_, err := h.db.Exec(`INSERT INTO tags (id, user_id, name, color) VALUES (?, ?, ?, ?)`,
-		t.ID, t.UserID, t.Name, t.Color)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if _, err := h.db.Exec(ctx,
+		`INSERT INTO tags (id, user_id, name, color) VALUES ($1,$2,$3,$4)`,
+		t.ID, t.UserID, t.Name, t.Color,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create tag"})
 		return
 	}
 	c.JSON(http.StatusCreated, t)
@@ -60,6 +65,7 @@ func (h *TagHandler) Create(c *gin.Context) {
 
 // PUT /tags/:id
 func (h *TagHandler) Update(c *gin.Context) {
+	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 	id := c.Param("id")
 
@@ -69,13 +75,15 @@ func (h *TagHandler) Update(c *gin.Context) {
 		return
 	}
 
-	res, err := h.db.Exec(`UPDATE tags SET name=?, color=? WHERE id=? AND user_id=?`,
-		req.Name, req.Color, id, userID)
+	tag, err := h.db.Exec(ctx,
+		`UPDATE tags SET name=$1, color=$2 WHERE id=$3 AND user_id=$4`,
+		req.Name, req.Color, id, userID,
+	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update tag"})
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if tag.RowsAffected() == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tag not found"})
 		return
 	}
@@ -84,14 +92,16 @@ func (h *TagHandler) Update(c *gin.Context) {
 
 // DELETE /tags/:id
 func (h *TagHandler) Delete(c *gin.Context) {
+	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 	id := c.Param("id")
-	res, err := h.db.Exec(`DELETE FROM tags WHERE id=? AND user_id=?`, id, userID)
+
+	tag, err := h.db.Exec(ctx, `DELETE FROM tags WHERE id=$1 AND user_id=$2`, id, userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete tag"})
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if tag.RowsAffected() == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tag not found"})
 		return
 	}
