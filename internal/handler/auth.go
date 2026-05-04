@@ -154,6 +154,10 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		`INSERT INTO workspaces (id, user_id, name, position, created_at, updated_at) VALUES ($1,$2,'My Workspace',0,$3,$4)`,
 		uuid.NewString(), userID, now, now,
 	)
+	h.db.Exec(ctx,
+		`INSERT INTO user_sync_seq (user_id, seq) VALUES ($1, 0) ON CONFLICT DO NOTHING`,
+		userID,
+	)
 
 	// Record this registration for per-IP captcha threshold tracking.
 	h.recordRegisterIPRequest(ctx, ip)
@@ -810,4 +814,30 @@ func validatePasswordStrength(password string) error {
 		return fmt.Errorf("password must contain at least one digit")
 	}
 	return nil
+}
+
+// POST /auth/sse-token
+// Issues a single-use, 30-second SSE authentication token.
+// The frontend calls this before opening the EventSource connection because
+// EventSource cannot set Authorization headers.
+func (h *AuthHandler) IssueSSEToken(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID := middleware.UserID(c)
+	now := time.Now().UnixMilli()
+	expiresAt := now + 30_000 // 30 seconds
+
+	token := uuid.NewString()
+
+	if _, err := h.db.Exec(ctx,
+		`INSERT INTO sse_tokens (token, user_id, expires_at) VALUES ($1, $2, $3)`,
+		token, userID, expiresAt,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue SSE token"})
+		return
+	}
+
+	// Purge expired tokens for this user to keep the table clean.
+	h.db.Exec(ctx, `DELETE FROM sse_tokens WHERE user_id = $1 AND expires_at < $2`, userID, now)
+
+	c.JSON(http.StatusOK, gin.H{"token": token})
 }

@@ -23,8 +23,8 @@ func (h *BookmarkHandler) List(c *gin.Context) {
 	userID := middleware.UserID(c)
 
 	query := `SELECT id, user_id, collection_id, title, url, favicon_url, description,
-	                 is_favorite, is_archived, is_trashed, position, created_at, updated_at
-	            FROM bookmarks WHERE user_id=$1`
+	                 is_favorite, is_archived, is_trashed, position, seq, created_at, updated_at
+	            FROM bookmarks WHERE user_id=$1 AND deleted_at IS NULL`
 	args := []any{userID}
 	n := 2
 
@@ -58,7 +58,7 @@ func (h *BookmarkHandler) List(c *gin.Context) {
 		var b model.Bookmark
 		rows.Scan(&b.ID, &b.UserID, &b.CollectionID, &b.Title, &b.URL,
 			&b.FaviconURL, &b.Description, &b.IsFavorite, &b.IsArchived,
-			&b.IsTrashed, &b.Position, &b.CreatedAt, &b.UpdatedAt)
+			&b.IsTrashed, &b.Position, &b.Seq, &b.CreatedAt, &b.UpdatedAt)
 		items = append(items, b)
 	}
 	c.JSON(http.StatusOK, items)
@@ -80,25 +80,46 @@ func (h *BookmarkHandler) Create(c *gin.Context) {
 		return
 	}
 
-	now := time.Now().Unix()
-	b := model.Bookmark{
-		ID: uuid.NewString(), UserID: userID,
-		CollectionID: req.CollectionID, Title: req.Title, URL: req.URL,
-		FaviconURL: req.FaviconURL, Description: req.Description,
-		IsFavorite: req.IsFavorite, IsArchived: req.IsArchived, IsTrashed: req.IsTrashed,
-		Position: req.Position, CreatedAt: now, UpdatedAt: now,
+	id := uuid.NewString()
+	now := time.Now().UnixMilli()
+
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tx begin failed"})
+		return
 	}
-	if _, err := h.db.Exec(ctx,
+	defer tx.Rollback(ctx)
+
+	seq, err := incrementSeq(ctx, tx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "seq increment failed"})
+		return
+	}
+
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO bookmarks (id, user_id, collection_id, title, url, favicon_url,
-		  description, is_favorite, is_archived, is_trashed, position, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-		b.ID, b.UserID, b.CollectionID, b.Title, b.URL, b.FaviconURL,
-		b.Description, b.IsFavorite, b.IsArchived, b.IsTrashed, b.Position, b.CreatedAt, b.UpdatedAt,
+		  description, is_favorite, is_archived, is_trashed, position, seq, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
+		id, userID, req.CollectionID, req.Title, req.URL, req.FaviconURL,
+		req.Description, req.IsFavorite, req.IsArchived, req.IsTrashed, req.Position, seq, now,
 	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create bookmark"})
 		return
 	}
-	c.JSON(http.StatusCreated, b)
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "commit failed"})
+		return
+	}
+
+	globalHub.Broadcast(userID, seq)
+	c.JSON(http.StatusCreated, model.Bookmark{
+		ID: id, UserID: userID, CollectionID: req.CollectionID,
+		Title: req.Title, URL: req.URL, FaviconURL: req.FaviconURL,
+		Description: req.Description, IsFavorite: req.IsFavorite,
+		IsArchived: req.IsArchived, IsTrashed: req.IsTrashed,
+		Position: req.Position, Seq: seq, CreatedAt: now, UpdatedAt: now,
+	})
 }
 
 // PUT /bookmarks/:id
@@ -113,13 +134,27 @@ func (h *BookmarkHandler) Update(c *gin.Context) {
 		return
 	}
 
-	now := time.Now().Unix()
-	tag, err := h.db.Exec(ctx,
+	now := time.Now().UnixMilli()
+
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tx begin failed"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	seq, err := incrementSeq(ctx, tx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "seq increment failed"})
+		return
+	}
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE bookmarks SET collection_id=$1, title=$2, url=$3, favicon_url=$4, description=$5,
-		  is_favorite=$6, is_archived=$7, is_trashed=$8, position=$9, updated_at=$10
-		  WHERE id=$11 AND user_id=$12`,
+		  is_favorite=$6, is_archived=$7, is_trashed=$8, position=$9, seq=$10, updated_at=$11
+		  WHERE id=$12 AND user_id=$13 AND deleted_at IS NULL`,
 		req.CollectionID, req.Title, req.URL, req.FaviconURL, req.Description,
-		req.IsFavorite, req.IsArchived, req.IsTrashed, req.Position, now, id, userID,
+		req.IsFavorite, req.IsArchived, req.IsTrashed, req.Position, seq, now, id, userID,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update bookmark"})
@@ -129,16 +164,40 @@ func (h *BookmarkHandler) Update(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "bookmark not found"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"id": id, "updated_at": now})
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "commit failed"})
+		return
+	}
+
+	globalHub.Broadcast(userID, seq)
+	c.JSON(http.StatusOK, gin.H{"id": id, "seq": seq, "updated_at": now})
 }
 
-// DELETE /bookmarks/:id
+// DELETE /bookmarks/:id  →  soft-delete
 func (h *BookmarkHandler) Delete(c *gin.Context) {
 	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 	id := c.Param("id")
+	now := time.Now().UnixMilli()
 
-	tag, err := h.db.Exec(ctx, `DELETE FROM bookmarks WHERE id=$1 AND user_id=$2`, id, userID)
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tx begin failed"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	seq, err := incrementSeq(ctx, tx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "seq increment failed"})
+		return
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE bookmarks SET deleted_at=$1, seq=$2, updated_at=$1
+		 WHERE id=$3 AND user_id=$4 AND deleted_at IS NULL`,
+		now, seq, id, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete bookmark"})
 		return
@@ -147,5 +206,12 @@ func (h *BookmarkHandler) Delete(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "bookmark not found"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "commit failed"})
+		return
+	}
+
+	globalHub.Broadcast(userID, seq)
+	c.Status(http.StatusNoContent)
 }

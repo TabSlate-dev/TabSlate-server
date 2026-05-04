@@ -6,7 +6,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/tabslate/server/db"
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/model"
@@ -22,30 +21,50 @@ func (h *CollectionHandler) List(c *gin.Context) {
 	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 
-	var rows pgx.Rows
 	var err error
+	var items []model.Collection
+
 	if wsID := c.Query("workspace_id"); wsID != "" {
-		rows, err = h.db.Query(ctx,
-			`SELECT id, user_id, workspace_id, name, icon, position, created_at, updated_at
-			 FROM collections WHERE user_id=$1 AND workspace_id=$2 ORDER BY position ASC`,
+		rows, qErr := h.db.Query(ctx,
+			`SELECT id, user_id, workspace_id, name, icon, position, seq, created_at, updated_at
+			 FROM collections WHERE user_id=$1 AND workspace_id=$2 AND deleted_at IS NULL ORDER BY position ASC`,
 			userID, wsID)
+		if qErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list collections"})
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var col model.Collection
+			rows.Scan(&col.ID, &col.UserID, &col.WorkspaceID, &col.Name, &col.Icon, &col.Position, &col.Seq, &col.CreatedAt, &col.UpdatedAt)
+			items = append(items, col)
+		}
+		err = rows.Err()
 	} else {
-		rows, err = h.db.Query(ctx,
-			`SELECT id, user_id, workspace_id, name, icon, position, created_at, updated_at
-			 FROM collections WHERE user_id=$1 ORDER BY position ASC`,
+		rows, qErr := h.db.Query(ctx,
+			`SELECT id, user_id, workspace_id, name, icon, position, seq, created_at, updated_at
+			 FROM collections WHERE user_id=$1 AND deleted_at IS NULL ORDER BY position ASC`,
 			userID)
+		if qErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list collections"})
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var col model.Collection
+			rows.Scan(&col.ID, &col.UserID, &col.WorkspaceID, &col.Name, &col.Icon, &col.Position, &col.Seq, &col.CreatedAt, &col.UpdatedAt)
+			items = append(items, col)
+		}
+		err = rows.Err()
 	}
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list collections"})
 		return
 	}
-	defer rows.Close()
 
-	items := []model.Collection{}
-	for rows.Next() {
-		var col model.Collection
-		rows.Scan(&col.ID, &col.UserID, &col.WorkspaceID, &col.Name, &col.Icon, &col.Position, &col.CreatedAt, &col.UpdatedAt)
-		items = append(items, col)
+	if items == nil {
+		items = []model.Collection{}
 	}
 	c.JSON(http.StatusOK, items)
 }
@@ -66,21 +85,42 @@ func (h *CollectionHandler) Create(c *gin.Context) {
 		return
 	}
 
-	now := time.Now().Unix()
-	col := model.Collection{
-		ID: uuid.NewString(), UserID: userID,
-		WorkspaceID: req.WorkspaceID, Name: req.Name, Icon: req.Icon, Position: req.Position,
-		CreatedAt: now, UpdatedAt: now,
+	id := uuid.NewString()
+	now := time.Now().UnixMilli()
+
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tx begin failed"})
+		return
 	}
-	if _, err := h.db.Exec(ctx,
-		`INSERT INTO collections (id, user_id, workspace_id, name, icon, position, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		col.ID, col.UserID, col.WorkspaceID, col.Name, col.Icon, col.Position, col.CreatedAt, col.UpdatedAt,
+	defer tx.Rollback(ctx)
+
+	seq, err := incrementSeq(ctx, tx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "seq increment failed"})
+		return
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO collections (id, user_id, workspace_id, name, icon, position, seq, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)`,
+		id, userID, req.WorkspaceID, req.Name, req.Icon, req.Position, seq, now,
 	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create collection"})
 		return
 	}
-	c.JSON(http.StatusCreated, col)
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "commit failed"})
+		return
+	}
+
+	globalHub.Broadcast(userID, seq)
+	c.JSON(http.StatusCreated, model.Collection{
+		ID: id, UserID: userID, WorkspaceID: req.WorkspaceID,
+		Name: req.Name, Icon: req.Icon, Position: req.Position,
+		Seq: seq, CreatedAt: now, UpdatedAt: now,
+	})
 }
 
 // PUT /collections/:id
@@ -95,12 +135,25 @@ func (h *CollectionHandler) Update(c *gin.Context) {
 		return
 	}
 
-	now := time.Now().Unix()
-	tag, err := h.db.Exec(ctx,
-		`UPDATE collections SET workspace_id=$1, name=$2, icon=$3, position=$4, updated_at=$5
-		 WHERE id=$6 AND user_id=$7`,
-		req.WorkspaceID, req.Name, req.Icon, req.Position, now, id, userID,
-	)
+	now := time.Now().UnixMilli()
+
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tx begin failed"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	seq, err := incrementSeq(ctx, tx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "seq increment failed"})
+		return
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE collections SET workspace_id=$1, name=$2, icon=$3, position=$4, seq=$5, updated_at=$6
+		 WHERE id=$7 AND user_id=$8 AND deleted_at IS NULL`,
+		req.WorkspaceID, req.Name, req.Icon, req.Position, seq, now, id, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update collection"})
 		return
@@ -109,16 +162,40 @@ func (h *CollectionHandler) Update(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "collection not found"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"id": id, "updated_at": now})
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "commit failed"})
+		return
+	}
+
+	globalHub.Broadcast(userID, seq)
+	c.JSON(http.StatusOK, gin.H{"id": id, "seq": seq, "updated_at": now})
 }
 
-// DELETE /collections/:id
+// DELETE /collections/:id  →  soft-delete
 func (h *CollectionHandler) Delete(c *gin.Context) {
 	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 	id := c.Param("id")
+	now := time.Now().UnixMilli()
 
-	tag, err := h.db.Exec(ctx, `DELETE FROM collections WHERE id=$1 AND user_id=$2`, id, userID)
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tx begin failed"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	seq, err := incrementSeq(ctx, tx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "seq increment failed"})
+		return
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE collections SET deleted_at=$1, seq=$2, updated_at=$1
+		 WHERE id=$3 AND user_id=$4 AND deleted_at IS NULL`,
+		now, seq, id, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete collection"})
 		return
@@ -127,5 +204,12 @@ func (h *CollectionHandler) Delete(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "collection not found"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "commit failed"})
+		return
+	}
+
+	globalHub.Broadcast(userID, seq)
+	c.Status(http.StatusNoContent)
 }

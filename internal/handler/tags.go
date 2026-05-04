@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -20,7 +21,9 @@ func (h *TagHandler) List(c *gin.Context) {
 	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 
-	rows, err := h.db.Query(ctx, `SELECT id, user_id, name, color FROM tags WHERE user_id=$1`, userID)
+	rows, err := h.db.Query(ctx,
+		`SELECT id, user_id, name, color, seq FROM tags WHERE user_id=$1 AND deleted_at IS NULL`,
+		userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list tags"})
 		return
@@ -30,7 +33,7 @@ func (h *TagHandler) List(c *gin.Context) {
 	items := []model.Tag{}
 	for rows.Next() {
 		var t model.Tag
-		rows.Scan(&t.ID, &t.UserID, &t.Name, &t.Color)
+		rows.Scan(&t.ID, &t.UserID, &t.Name, &t.Color, &t.Seq)
 		items = append(items, t)
 	}
 	c.JSON(http.StatusOK, items)
@@ -52,15 +55,37 @@ func (h *TagHandler) Create(c *gin.Context) {
 		return
 	}
 
-	t := model.Tag{ID: uuid.NewString(), UserID: userID, Name: req.Name, Color: req.Color}
-	if _, err := h.db.Exec(ctx,
-		`INSERT INTO tags (id, user_id, name, color) VALUES ($1,$2,$3,$4)`,
-		t.ID, t.UserID, t.Name, t.Color,
+	id := uuid.NewString()
+
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tx begin failed"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	seq, err := incrementSeq(ctx, tx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "seq increment failed"})
+		return
+	}
+
+	now := time.Now().UnixMilli()
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO tags (id, user_id, name, color, seq, updated_at) VALUES ($1,$2,$3,$4,$5,$6)`,
+		id, userID, req.Name, req.Color, seq, now,
 	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create tag"})
 		return
 	}
-	c.JSON(http.StatusCreated, t)
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "commit failed"})
+		return
+	}
+
+	globalHub.Broadcast(userID, seq)
+	c.JSON(http.StatusCreated, model.Tag{ID: id, UserID: userID, Name: req.Name, Color: req.Color, Seq: seq})
 }
 
 // PUT /tags/:id
@@ -75,9 +100,22 @@ func (h *TagHandler) Update(c *gin.Context) {
 		return
 	}
 
-	tag, err := h.db.Exec(ctx,
-		`UPDATE tags SET name=$1, color=$2 WHERE id=$3 AND user_id=$4`,
-		req.Name, req.Color, id, userID,
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tx begin failed"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	seq, err := incrementSeq(ctx, tx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "seq increment failed"})
+		return
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE tags SET name=$1, color=$2, seq=$3, updated_at=$4 WHERE id=$5 AND user_id=$6 AND deleted_at IS NULL`,
+		req.Name, req.Color, seq, time.Now().UnixMilli(), id, userID,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update tag"})
@@ -87,16 +125,39 @@ func (h *TagHandler) Update(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tag not found"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"id": id})
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "commit failed"})
+		return
+	}
+
+	globalHub.Broadcast(userID, seq)
+	c.JSON(http.StatusOK, gin.H{"id": id, "seq": seq})
 }
 
-// DELETE /tags/:id
+// DELETE /tags/:id  →  soft-delete
 func (h *TagHandler) Delete(c *gin.Context) {
 	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 	id := c.Param("id")
+	now := time.Now().UnixMilli()
 
-	tag, err := h.db.Exec(ctx, `DELETE FROM tags WHERE id=$1 AND user_id=$2`, id, userID)
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tx begin failed"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	seq, err := incrementSeq(ctx, tx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "seq increment failed"})
+		return
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE tags SET deleted_at=$1, seq=$2, updated_at=$1 WHERE id=$3 AND user_id=$4 AND deleted_at IS NULL`,
+		now, seq, id, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete tag"})
 		return
@@ -105,5 +166,12 @@ func (h *TagHandler) Delete(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tag not found"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "commit failed"})
+		return
+	}
+
+	globalHub.Broadcast(userID, seq)
+	c.Status(http.StatusNoContent)
 }

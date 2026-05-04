@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -101,12 +103,30 @@ func (s *Server) SyncSubscription(ctx context.Context, userID, planCode, status 
 	return nil
 }
 
-// Run starts the HTTP server and blocks until it exits.
+// Run starts the HTTP server and blocks until the process context is cancelled.
 func (s *Server) Run() {
 	addr := ":" + s.cfg.Port
+	ln, err := net.Listen("tcp4", addr)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+
+	httpSrv := &http.Server{Handler: s.router}
 	log.Printf("TabSlate server listening on %s", addr)
-	if err := s.router.Run(addr); err != nil {
-		log.Fatal(err)
+
+	go func() {
+		if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("serve: %v", err)
+		}
+	}()
+
+	<-s.ctx.Done()
+	log.Println("shutting down...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("server shutdown: %v", err)
 	}
 }
 
@@ -135,11 +155,15 @@ func (s *Server) setupRoutes() {
 	bmH := handler.NewBookmarkHandler(s.db)
 	tagH := handler.NewTagHandler(s.db)
 	syncH := handler.NewSyncHandler(s.db)
+	sseH := handler.NewSSEHandler(s.db)
 	billH := handler.NewBillingHandler(s.billing)
 
 	// ── Rate limiters ─────────────────────────────────────────────────────────
 	// 10 requests/minute per IP for auth endpoints (register, login, resend).
 	authRL := middleware.NewRateLimiter(10, 1*time.Minute)
+	// 60 req/min per IP for sync push, 120 req/min per IP for sync pull.
+	syncPushRL := middleware.NewRateLimiter(60, 1*time.Minute)
+	syncPullRL := middleware.NewRateLimiter(120, 1*time.Minute)
 
 	// ── Public routes ─────────────────────────────────────────────────────────
 	s.router.GET("/captcha/widget", captchaH.Widget)
@@ -159,6 +183,9 @@ func (s *Server) setupRoutes() {
 		auth.GET("/otp-captcha-status", authH.OTPCaptchaStatus)
 		auth.GET("/register-captcha-status", authH.RegisterCaptchaStatus)
 	}
+
+	// ── SSE stream — unauthenticated (SSE token auth inside handler) ─────────
+	s.router.GET("/sync/stream", sseH.Stream)
 
 	// ── Protected routes ──────────────────────────────────────────────────────
 	api := s.router.Group("/")
@@ -186,8 +213,13 @@ func (s *Server) setupRoutes() {
 		api.PUT("/tags/:id", tagH.Update)
 		api.DELETE("/tags/:id", tagH.Delete)
 
-		api.GET("/sync", syncH.Pull)
-		api.POST("/sync", syncH.Push)
+		api.POST("/auth/sse-token", authH.IssueSSEToken)
+
+		api.POST("/sync/push", func(c *gin.Context) {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 512*1024)
+			c.Next()
+		}, middleware.RateLimitByIP(syncPushRL), syncH.Push)
+		api.GET("/sync/pull", middleware.RateLimitByIP(syncPullRL), syncH.Pull)
 
 		// Billing — behaviour varies by provider (OSS vs Cloud)
 		bill := api.Group("/api")

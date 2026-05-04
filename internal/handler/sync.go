@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -8,145 +9,144 @@ import (
 	"github.com/tabslate/server/db"
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/model"
+	"github.com/tabslate/server/internal/plan"
 )
 
 type SyncHandler struct{ db *db.DB }
 
 func NewSyncHandler(d *db.DB) *SyncHandler { return &SyncHandler{db: d} }
 
-// GET /sync?since=<unix_timestamp>
-func (h *SyncHandler) Pull(c *gin.Context) {
-	ctx := c.Request.Context()
-	userID := middleware.UserID(c)
-	var since int64
-	if s := c.Query("since"); s != "" {
-		since = parseUnixParam(s)
-	}
-
-	resp := model.SyncResponse{ServerTime: time.Now().Unix()}
-
-	if rows, err := h.db.Query(ctx,
-		`SELECT id, user_id, name, icon, color, position, created_at, updated_at
-		 FROM workspaces WHERE user_id=$1 AND updated_at>$2`, userID, since); err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var w model.Workspace
-			rows.Scan(&w.ID, &w.UserID, &w.Name, &w.Icon, &w.Color, &w.Position, &w.CreatedAt, &w.UpdatedAt)
-			resp.Workspaces = append(resp.Workspaces, w)
-		}
-	}
-
-	if rows, err := h.db.Query(ctx,
-		`SELECT id, user_id, workspace_id, name, icon, position, created_at, updated_at
-		 FROM collections WHERE user_id=$1 AND updated_at>$2`, userID, since); err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var col model.Collection
-			rows.Scan(&col.ID, &col.UserID, &col.WorkspaceID, &col.Name, &col.Icon, &col.Position, &col.CreatedAt, &col.UpdatedAt)
-			resp.Collections = append(resp.Collections, col)
-		}
-	}
-
-	if rows, err := h.db.Query(ctx,
-		`SELECT id, user_id, collection_id, title, url, favicon_url, description,
-		        is_favorite, is_archived, is_trashed, position, created_at, updated_at
-		 FROM bookmarks WHERE user_id=$1 AND updated_at>$2`, userID, since); err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var b model.Bookmark
-			rows.Scan(&b.ID, &b.UserID, &b.CollectionID, &b.Title, &b.URL,
-				&b.FaviconURL, &b.Description, &b.IsFavorite, &b.IsArchived,
-				&b.IsTrashed, &b.Position, &b.CreatedAt, &b.UpdatedAt)
-			resp.Bookmarks = append(resp.Bookmarks, b)
-		}
-	}
-
-	if rows, err := h.db.Query(ctx,
-		`SELECT id, user_id, name, color FROM tags WHERE user_id=$1`, userID); err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var t model.Tag
-			rows.Scan(&t.ID, &t.UserID, &t.Name, &t.Color)
-			resp.Tags = append(resp.Tags, t)
-		}
-	}
-
-	c.JSON(http.StatusOK, resp)
-}
-
-// POST /sync
+// POST /sync/push
+// Accepts client changes, applies LWW upserts, stamps with server seq.
 func (h *SyncHandler) Push(c *gin.Context) {
 	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 
-	var payload model.SyncPush
-	if err := c.ShouldBindJSON(&payload); err != nil {
+	var req model.SyncPushRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Enforce entity count limit.
+	total := len(req.Entities.Workspaces) + len(req.Entities.Collections) +
+		len(req.Entities.Bookmarks) + len(req.Entities.Tags)
+	if total > 1000 {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "too many entities in one push (max 1000)"})
 		return
 	}
 
 	tx, err := h.db.Begin(ctx)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "transaction failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tx begin failed"})
 		return
 	}
 	defer tx.Rollback(ctx)
 
-	for _, w := range payload.Workspaces {
-		if w.UserID != userID {
-			continue
-		}
-		tx.Exec(ctx, `
-			INSERT INTO workspaces (id, user_id, name, icon, color, position, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-			ON CONFLICT(id) DO UPDATE SET
-			  name=excluded.name, icon=excluded.icon, color=excluded.color,
-			  position=excluded.position, updated_at=excluded.updated_at
-			WHERE excluded.updated_at > workspaces.updated_at`,
-			w.ID, userID, w.Name, w.Icon, w.Color, w.Position, w.CreatedAt, w.UpdatedAt)
+	seq, err := incrementSeq(ctx, tx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "seq increment failed"})
+		return
 	}
 
-	for _, col := range payload.Collections {
-		if col.UserID != userID {
-			continue
+	now := time.Now().UnixMilli()
+	var rejected []model.Rejected
+
+	// ── Workspaces ────────────────────────────────────────────────────────────
+	for _, ws := range req.Entities.Workspaces {
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO workspaces (id, user_id, name, icon, color, position, seq, deleted_at, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
+			ON CONFLICT (id) DO UPDATE
+			  SET name=$3, icon=$4, color=$5, position=$6, seq=$7, deleted_at=$8, updated_at=$9
+			WHERE workspaces.user_id = $2 AND workspaces.updated_at < $9`,
+			ws.ID, userID, ws.Name, ws.Icon, ws.Color, ws.Position, seq, ws.DeletedAt, now)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace upsert failed"})
+			return
 		}
-		tx.Exec(ctx, `
-			INSERT INTO collections (id, user_id, workspace_id, name, icon, position, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-			ON CONFLICT(id) DO UPDATE SET
-			  workspace_id=excluded.workspace_id, name=excluded.name, icon=excluded.icon,
-			  position=excluded.position, updated_at=excluded.updated_at
-			WHERE excluded.updated_at > collections.updated_at`,
-			col.ID, userID, col.WorkspaceID, col.Name, col.Icon, col.Position, col.CreatedAt, col.UpdatedAt)
+		if tag.RowsAffected() == 0 {
+			rejected = append(rejected, model.Rejected{ID: ws.ID, Reason: "stale"})
+		}
 	}
 
-	for _, b := range payload.Bookmarks {
-		if b.UserID != userID {
-			continue
+	// ── Collections ───────────────────────────────────────────────────────────
+	for _, col := range req.Entities.Collections {
+		if col.DeletedAt == nil {
+			userPlan := plan.GetUserPlan(ctx, h.db, userID)
+			limits := plan.Get(userPlan)
+			if limits.MaxCollections != -1 {
+				var count int
+				if err := tx.QueryRow(ctx,
+					`SELECT COUNT(*) FROM collections WHERE user_id = $1 AND deleted_at IS NULL AND archived_at IS NULL`,
+					userID,
+				).Scan(&count); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+					return
+				}
+				if count >= limits.MaxCollections {
+					rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "quota_exceeded"})
+					continue
+				}
+			}
 		}
-		tx.Exec(ctx, `
-			INSERT INTO bookmarks (id, user_id, collection_id, title, url, favicon_url,
-			  description, is_favorite, is_archived, is_trashed, position, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-			ON CONFLICT(id) DO UPDATE SET
-			  collection_id=excluded.collection_id, title=excluded.title, url=excluded.url,
-			  favicon_url=excluded.favicon_url, description=excluded.description,
-			  is_favorite=excluded.is_favorite, is_archived=excluded.is_archived,
-			  is_trashed=excluded.is_trashed, position=excluded.position,
-			  updated_at=excluded.updated_at
-			WHERE excluded.updated_at > bookmarks.updated_at`,
-			b.ID, userID, b.CollectionID, b.Title, b.URL, b.FaviconURL,
-			b.Description, b.IsFavorite, b.IsArchived, b.IsTrashed, b.Position, b.CreatedAt, b.UpdatedAt)
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO collections (id, user_id, workspace_id, name, icon, position, seq, deleted_at, archived_at, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
+			ON CONFLICT (id) DO UPDATE
+			  SET workspace_id=$3, name=$4, icon=$5, position=$6, seq=$7, deleted_at=$8, archived_at=$9, updated_at=$10
+			WHERE collections.user_id = $2 AND collections.updated_at < $10`,
+			col.ID, userID, col.WorkspaceID, col.Name, col.Icon, col.Position, seq, col.DeletedAt, col.ArchivedAt, now)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "collection upsert failed"})
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "stale"})
+		}
 	}
 
-	for _, t := range payload.Tags {
-		if t.UserID != userID {
-			continue
+	// ── Bookmarks ─────────────────────────────────────────────────────────────
+	for _, bm := range req.Entities.Bookmarks {
+		tagIDs := bm.TagIDs
+		if tagIDs == nil {
+			tagIDs = []string{}
 		}
-		tx.Exec(ctx, `
-			INSERT INTO tags (id, user_id, name, color) VALUES ($1,$2,$3,$4)
-			ON CONFLICT(id) DO UPDATE SET name=excluded.name, color=excluded.color`,
-			t.ID, userID, t.Name, t.Color)
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO bookmarks (id, user_id, collection_id, title, url, favicon_url, description,
+			                       is_favorite, is_archived, is_trashed, position, seq, deleted_at, created_at, updated_at, tag_ids)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15)
+			ON CONFLICT (id) DO UPDATE
+			  SET collection_id=$3, title=$4, url=$5, favicon_url=$6, description=$7,
+			      is_favorite=$8, is_archived=$9, is_trashed=$10, position=$11, seq=$12, deleted_at=$13, updated_at=$14, tag_ids=$15
+			WHERE bookmarks.user_id = $2 AND bookmarks.updated_at < $14`,
+			bm.ID, userID, bm.CollectionID, bm.Title, bm.URL, bm.FaviconURL, bm.Description,
+			bm.IsFavorite, bm.IsArchived, bm.IsTrashed, bm.Position, seq, bm.DeletedAt, now, tagIDs)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark upsert failed"})
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			rejected = append(rejected, model.Rejected{ID: bm.ID, Reason: "stale"})
+		}
+	}
+
+	// ── Tags ──────────────────────────────────────────────────────────────────
+	for _, t := range req.Entities.Tags {
+		res, err := tx.Exec(ctx, `
+			INSERT INTO tags (id, user_id, name, color, seq, deleted_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7)
+			ON CONFLICT (id) DO UPDATE
+			  SET name=$3, color=$4, seq=$5, deleted_at=$6, updated_at=$7
+			WHERE tags.user_id = $2 AND tags.updated_at < $7`,
+			t.ID, userID, t.Name, t.Color, seq, t.DeletedAt, now)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "tag upsert failed"})
+			return
+		}
+		if res.RowsAffected() == 0 {
+			rejected = append(rejected, model.Rejected{ID: t.ID, Reason: "stale"})
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -154,16 +154,150 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"ok": true, "server_time": time.Now().Unix()})
+	globalHub.Broadcast(userID, seq)
+
+	if rejected == nil {
+		rejected = []model.Rejected{}
+	}
+	c.JSON(http.StatusOK, model.SyncPushResponse{ServerSeq: seq, Rejected: rejected})
 }
 
-func parseUnixParam(s string) int64 {
-	var v int64
-	for _, ch := range s {
-		if ch < '0' || ch > '9' {
-			return 0
+// GET /sync/pull?after_seq=<N>
+// Returns all entities (including soft-deleted) with seq > N for the caller.
+func (h *SyncHandler) Pull(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID := middleware.UserID(c)
+
+	var afterSeq int64
+	if s := c.Query("after_seq"); s != "" {
+		if _, err := fmt.Sscanf(s, "%d", &afterSeq); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid after_seq"})
+			return
 		}
-		v = v*10 + int64(ch-'0')
+		if afterSeq < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "after_seq must be non-negative"})
+			return
+		}
 	}
-	return v
+
+	var resp model.SyncPullResponse
+
+	// Workspaces
+	wsRows, err := h.db.Query(ctx,
+		`SELECT id, user_id, name, icon, color, position, seq, deleted_at, created_at, updated_at
+         FROM workspaces WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
+		userID, afterSeq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "workspaces query failed"})
+		return
+	}
+	defer wsRows.Close()
+	for wsRows.Next() {
+		var ws model.Workspace
+		if err := wsRows.Scan(&ws.ID, &ws.UserID, &ws.Name, &ws.Icon, &ws.Color, &ws.Position,
+			&ws.Seq, &ws.DeletedAt, &ws.CreatedAt, &ws.UpdatedAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace scan failed"})
+			return
+		}
+		resp.Entities.Workspaces = append(resp.Entities.Workspaces, ws)
+	}
+	if err := wsRows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "workspaces iteration failed"})
+		return
+	}
+
+	// Collections
+	colRows, err := h.db.Query(ctx,
+		`SELECT id, user_id, workspace_id, name, icon, position, seq, deleted_at, archived_at, created_at, updated_at
+         FROM collections WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
+		userID, afterSeq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "collections query failed"})
+		return
+	}
+	defer colRows.Close()
+	for colRows.Next() {
+		var col model.Collection
+		if err := colRows.Scan(&col.ID, &col.UserID, &col.WorkspaceID, &col.Name, &col.Icon, &col.Position,
+			&col.Seq, &col.DeletedAt, &col.ArchivedAt, &col.CreatedAt, &col.UpdatedAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "collection scan failed"})
+			return
+		}
+		resp.Entities.Collections = append(resp.Entities.Collections, col)
+	}
+	if err := colRows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "collections iteration failed"})
+		return
+	}
+
+	// Bookmarks
+	bmRows, err := h.db.Query(ctx,
+		`SELECT id, user_id, collection_id, title, url, favicon_url, description,
+                is_favorite, is_archived, is_trashed, tag_ids, position, seq, deleted_at, created_at, updated_at
+         FROM bookmarks WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
+		userID, afterSeq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmarks query failed"})
+		return
+	}
+	defer bmRows.Close()
+	for bmRows.Next() {
+		var bm model.Bookmark
+		if err := bmRows.Scan(&bm.ID, &bm.UserID, &bm.CollectionID, &bm.Title, &bm.URL, &bm.FaviconURL,
+			&bm.Description, &bm.IsFavorite, &bm.IsArchived, &bm.IsTrashed, &bm.TagIDs, &bm.Position,
+			&bm.Seq, &bm.DeletedAt, &bm.CreatedAt, &bm.UpdatedAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark scan failed"})
+			return
+		}
+		if bm.TagIDs == nil {
+			bm.TagIDs = []string{}
+		}
+		resp.Entities.Bookmarks = append(resp.Entities.Bookmarks, bm)
+	}
+	if err := bmRows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmarks iteration failed"})
+		return
+	}
+
+	// Tags — model.Tag has no UpdatedAt field; omit updated_at from SELECT
+	tagRows, err := h.db.Query(ctx,
+		`SELECT id, user_id, name, color, seq, deleted_at
+         FROM tags WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
+		userID, afterSeq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tags query failed"})
+		return
+	}
+	defer tagRows.Close()
+	for tagRows.Next() {
+		var t model.Tag
+		if err := tagRows.Scan(&t.ID, &t.UserID, &t.Name, &t.Color, &t.Seq, &t.DeletedAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "tag scan failed"})
+			return
+		}
+		resp.Entities.Tags = append(resp.Entities.Tags, t)
+	}
+	if err := tagRows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "tags iteration failed"})
+		return
+	}
+
+	// Ensure slices are not nil in JSON output ([] not null)
+	if resp.Entities.Workspaces == nil {
+		resp.Entities.Workspaces = []model.Workspace{}
+	}
+	if resp.Entities.Collections == nil {
+		resp.Entities.Collections = []model.Collection{}
+	}
+	if resp.Entities.Bookmarks == nil {
+		resp.Entities.Bookmarks = []model.Bookmark{}
+	}
+	if resp.Entities.Tags == nil {
+		resp.Entities.Tags = []model.Tag{}
+	}
+
+	serverSeq, _ := currentSeq(ctx, h.db, userID)
+	resp.ServerSeq = serverSeq
+
+	c.JSON(http.StatusOK, resp)
 }
