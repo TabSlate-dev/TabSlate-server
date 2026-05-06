@@ -39,17 +39,21 @@ TabSlate-server/
     ├── mailer/              # 邮件发送：SMTP 或 Resend；MAIL_PROVIDER 为空则禁用
     ├── middleware/
     │   ├── auth.go          # Bearer JWT 验证中间件
-    │   └── ratelimit.go     # IP 速率限制（滑动窗口，in-memory）
+    │   └── ratelimit.go     # IP 速率限制（滑动窗口，in-memory）；各端点限流值通过环境变量配置
     ├── model/               # 请求/响应结构体、Plan 常量
     ├── plan/                # 本地 DB 配额检查（过渡期）
+    ├── search/
+    │   ├── types.go         # BookmarkDoc（MeiliSearch 文档结构）
+    │   └── client.go        # Client：nil-safe 包装器；MEILISEARCH_HOST 为空时返回 nil（禁用）
     └── handler/
         ├── auth.go          # 注册、登录、OTP 验证、密码重置、SSE token 签发
         ├── workspaces.go    # CRUD /workspaces
         ├── collections.go   # CRUD /collections
-        ├── bookmarks.go     # CRUD /bookmarks
+        ├── bookmarks.go     # CRUD /bookmarks；Create/Update/Delete 后触发 MeiliSearch upsert/delete（fire-and-forget）
         ├── tags.go          # CRUD /tags
-        ├── sync.go          # POST /sync/push、GET /sync/pull
+        ├── sync.go          # POST /sync/push、GET /sync/pull；Push 提交后批量触发 MeiliSearch 更新
         ├── sync_seq.go      # incrementSeq / currentSeq（per-user 单调序列）
+        ├── search.go        # GET /search?q=（书签全文搜索；最少 2 个 Unicode 字符；需 Bearer JWT）
         ├── sse.go           # GET /sync/stream（SSE 流）
         ├── sse_hub.go       # globalHub：in-memory pub/sub（userID → connID → chan int64）
         ├── billing.go       # GET+POST /api/subscription、/api/limits 等
@@ -80,8 +84,9 @@ TabSlate-server/
 | GET/POST/PUT/DELETE | `/collections` | 集合 CRUD | Bearer JWT |
 | GET/POST/PUT/DELETE | `/bookmarks` | 书签 CRUD | Bearer JWT |
 | GET/POST/PUT/DELETE | `/tags` | 标签 CRUD | Bearer JWT |
-| POST | `/sync/push` | 批量推送本地变更（512KB 限制，60 req/min） | Bearer JWT |
-| GET | `/sync/pull` | 拉取指定 seq 之后的增量（120 req/min） | Bearer JWT |
+| POST | `/sync/push` | 批量推送本地变更（512KB 限制） | Bearer JWT |
+| GET | `/sync/pull` | 拉取指定 seq 之后的增量 | Bearer JWT |
+| GET | `/search` | 全文搜索书签（`?q=`，最少 2 字符，MeiliSearch） | Bearer JWT |
 | GET | `/api/subscription` | 当前订阅信息 | Bearer JWT |
 | GET | `/api/limits` | 当前配额限制 | Bearer JWT |
 | POST | `/api/checkout` | 创建结账会话（Cloud） | Bearer JWT |
@@ -107,7 +112,8 @@ POST /sync/push  →  SyncHandler.Push
   5. incrementSeq → 新 seq
   6. 提交事务
   7. globalHub.Broadcast(userID, seq)  // 通知所有 SSE 连接
-  8. 返回 { server_seq, rejected: [] }
+  8. 对成功 upsert 的书签触发 MeiliSearch upsert/delete（事务提交后，fire-and-forget）
+  9. 返回 { server_seq, rejected: [] }
 ```
 
 ### Pull 流程
@@ -185,6 +191,27 @@ CREATE INDEX idx_bookmarks_user_seq   ON bookmarks   (user_id, seq);
 CREATE INDEX idx_tags_user_seq        ON tags        (user_id, seq);
 ```
 
+## MeiliSearch 搜索索引
+
+`internal/search.Client` 是一个 nil-safe 包装器：
+
+- `MEILISEARCH_HOST` 为空 → `search.New()` 返回 `nil`，所有方法均为 no-op，服务正常启动但不索引
+- 非空 → 在 `bookmarks` 索引上设置 `FilterableAttributes: ["userId"]`，`SearchableAttributes: ["title", "url", "description"]`
+- `UpsertBookmark` / `DeleteBookmark` 均为 fire-and-forget goroutine，失败时记录日志但不影响 HTTP 响应
+- `SearchBookmarks` 在查询时强制追加 `Filter: userId = "<userID>"`，确保跨用户数据隔离
+
+**触发时机：**
+
+| 事件 | 操作 |
+|---|---|
+| `POST /bookmarks`（Create） | UpsertBookmark |
+| `PUT /bookmarks/:id`（Update，非 trashed） | UpsertBookmark |
+| `PUT /bookmarks/:id`（Update，is_trashed=true） | DeleteBookmark |
+| `DELETE /bookmarks/:id`（软删除） | DeleteBookmark |
+| `POST /sync/push`（Push，书签 upsert 成功） | 批量 Upsert 或 Delete（提交后） |
+
+**冷启动注意：** MeiliSearch 的 `UpdateSettings` 是异步任务，极短时间内的首次搜索请求可能因 `userId` 尚未变为 filterable 而返回 500。通常在数秒内自动恢复。
+
 ## 依赖注入模型
 
 ```
@@ -193,7 +220,8 @@ cmd/server/main.go
   → app.New(cfg, db, provider, ctx)
       ├── captcha.New(cfg.ProsopoSecret, ...)
       ├── mailer.New(cfg.MailProvider, ...)
-      └── handler.New*(db, ...)              # 每个 handler 持有 *db.DB；auth handler 额外持有 billing.Provider/captcha/mailer
+      ├── search.New(cfg.MeiliSearchHost, cfg.MeiliSearchAPIKey)  # nil if not configured
+      └── handler.New*(db, search, ...)      # bookmarks/sync/search handler 持有 *search.Client
 ```
 
 Cloud 仓库只需将 `local.New(...)` 替换为 `lago.New(...)`，并调用 `s.RegisterWebhook("/webhooks/lago", lagoHandler)` 即可。
