@@ -170,11 +170,9 @@ func (s *Server) setupRoutes() {
 	billH := handler.NewBillingHandler(s.billing)
 
 	// ── Rate limiters ─────────────────────────────────────────────────────────
-	// 10 requests/minute per IP for auth endpoints (register, login, resend).
-	authRL := middleware.NewRateLimiter(10, 1*time.Minute)
-	// 60 req/min per IP for sync push, 120 req/min per IP for sync pull.
-	syncPushRL := middleware.NewRateLimiter(60, 1*time.Minute)
-	syncPullRL := middleware.NewRateLimiter(120, 1*time.Minute)
+	authRL     := middleware.NewRateLimiter(s.cfg.RateLimitAuth, s.cfg.RateLimitAuthWindow)
+	syncPushRL := middleware.NewRateLimiter(s.cfg.RateLimitSyncPush, s.cfg.RateLimitSyncPushWindow)
+	syncPullRL := middleware.NewRateLimiter(s.cfg.RateLimitSyncPull, s.cfg.RateLimitSyncPullWindow)
 
 	// ── Public routes ─────────────────────────────────────────────────────────
 	s.router.GET("/captcha/widget", captchaH.Widget)
@@ -219,7 +217,7 @@ func (s *Server) setupRoutes() {
 		api.PUT("/bookmarks/:id", bmH.Update)
 		api.DELETE("/bookmarks/:id", bmH.Delete)
 
-		searchRL := middleware.NewRateLimiter(60, 1*time.Minute)
+		searchRL := middleware.NewRateLimiter(s.cfg.RateLimitSearch, s.cfg.RateLimitSearchWindow)
 		api.GET("/search", middleware.RateLimitByIP(searchRL), searchH.Search)
 
 		api.GET("/tags", tagH.List)
