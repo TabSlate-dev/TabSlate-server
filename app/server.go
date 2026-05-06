@@ -16,6 +16,7 @@ import (
 	"github.com/tabslate/server/internal/handler"
 	"github.com/tabslate/server/internal/mailer"
 	"github.com/tabslate/server/internal/middleware"
+	"github.com/tabslate/server/internal/search"
 )
 
 // Server is the HTTP server for the TabSlate backend.
@@ -27,6 +28,7 @@ type Server struct {
 	billing billing.Provider
 	captcha *captcha.Verifier
 	mailer  *mailer.Mailer
+	search  *search.Client
 	router  *gin.Engine
 	ctx     context.Context
 }
@@ -64,12 +66,20 @@ func New(cfg *Config, database *db.DB, bp billing.Provider, ctx context.Context)
 		log.Println("email disabled — users will be auto-verified")
 	}
 
+	sc := search.New(cfg.MeiliSearchHost, cfg.MeiliSearchAPIKey)
+	if sc != nil {
+		log.Println("meilisearch search indexing enabled")
+	} else {
+		log.Println("meilisearch not configured — search indexing disabled")
+	}
+
 	s := &Server{
 		cfg:     cfg,
 		db:      database,
 		billing: bp,
 		captcha: cv,
 		mailer:  m,
+		search:  sc,
 		router:  gin.Default(),
 		ctx:     ctx,
 	}
@@ -152,9 +162,10 @@ func (s *Server) setupRoutes() {
 	captchaH := handler.NewCaptchaHandler(s.cfg.ProsopoBundleURL)
 	wsH := handler.NewWorkspaceHandler(s.db)
 	colH := handler.NewCollectionHandler(s.db)
-	bmH := handler.NewBookmarkHandler(s.db)
+	bmH := handler.NewBookmarkHandler(s.db, s.search)
 	tagH := handler.NewTagHandler(s.db)
-	syncH := handler.NewSyncHandler(s.db)
+	syncH := handler.NewSyncHandler(s.db, s.search)
+	searchH := handler.NewSearchHandler(s.search)
 	sseH := handler.NewSSEHandler(s.db)
 	billH := handler.NewBillingHandler(s.billing)
 
@@ -207,6 +218,8 @@ func (s *Server) setupRoutes() {
 		api.POST("/bookmarks", bmH.Create)
 		api.PUT("/bookmarks/:id", bmH.Update)
 		api.DELETE("/bookmarks/:id", bmH.Delete)
+
+		api.GET("/search", searchH.Search)
 
 		api.GET("/tags", tagH.List)
 		api.POST("/tags", tagH.Create)

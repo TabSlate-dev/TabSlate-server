@@ -10,11 +10,17 @@ import (
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/model"
 	"github.com/tabslate/server/internal/plan"
+	"github.com/tabslate/server/internal/search"
 )
 
-type SyncHandler struct{ db *db.DB }
+type SyncHandler struct {
+	db     *db.DB
+	search *search.Client
+}
 
-func NewSyncHandler(d *db.DB) *SyncHandler { return &SyncHandler{db: d} }
+func NewSyncHandler(d *db.DB, sc *search.Client) *SyncHandler {
+	return &SyncHandler{db: d, search: sc}
+}
 
 // POST /sync/push
 // Accepts client changes, applies LWW upserts, stamps with server seq.
@@ -106,6 +112,9 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		}
 	}
 
+	var searchUpserts []search.BookmarkDoc
+	var searchDeletes []string
+
 	// ── Bookmarks ─────────────────────────────────────────────────────────────
 	for _, bm := range req.Entities.Bookmarks {
 		tagIDs := bm.TagIDs
@@ -128,6 +137,20 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		}
 		if tag.RowsAffected() == 0 {
 			rejected = append(rejected, model.Rejected{ID: bm.ID, Reason: "stale"})
+		} else {
+			if bm.DeletedAt != nil || bm.IsTrashed {
+				searchDeletes = append(searchDeletes, bm.ID)
+			} else {
+				searchUpserts = append(searchUpserts, search.BookmarkDoc{
+					ID:           bm.ID,
+					UserID:       userID,
+					Title:        bm.Title,
+					URL:          bm.URL,
+					Description:  bm.Description,
+					CollectionID: derefStr(bm.CollectionID),
+					IsArchived:   bm.IsArchived,
+				})
+			}
 		}
 	}
 
@@ -155,6 +178,13 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	}
 
 	globalHub.Broadcast(userID, seq)
+
+	for _, doc := range searchUpserts {
+		h.search.UpsertBookmark(doc)
+	}
+	for _, id := range searchDeletes {
+		h.search.DeleteBookmark(id)
+	}
 
 	if rejected == nil {
 		rejected = []model.Rejected{}

@@ -73,6 +73,14 @@ type Config struct {
 	// OTPCaptchaWindow is the look-back period for per-IP OTP request counting.
 	// Accepts any Go duration string. Defaults to 15m.
 	OTPCaptchaWindow time.Duration
+
+	// ── MeiliSearch ──────────────────────────────────────────────────────────────
+	// MeiliSearchHost is the internal URL of the MeiliSearch instance,
+	// e.g. "http://meilisearch:7700". Leave empty to disable search indexing.
+	MeiliSearchHost string
+
+	// MeiliSearchAPIKey is the master or admin API key for MeiliSearch.
+	MeiliSearchAPIKey string
 }
 
 // LoadConfig reads configuration from environment variables and fatals on any
@@ -107,6 +115,9 @@ func LoadConfig() *Config {
 		// OTP resend captcha
 		OTPCaptchaThreshold: envInt("OTP_CAPTCHA_THRESHOLD", 5),
 		OTPCaptchaWindow:    envDuration("OTP_CAPTCHA_WINDOW", 15*time.Minute),
+
+		MeiliSearchHost:   os.Getenv("MEILISEARCH_HOST"),
+		MeiliSearchAPIKey: os.Getenv("MEILISEARCH_API_KEY"),
 	}
 }
 
