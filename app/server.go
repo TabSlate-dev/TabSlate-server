@@ -219,7 +219,8 @@ func (s *Server) setupRoutes() {
 		api.PUT("/bookmarks/:id", bmH.Update)
 		api.DELETE("/bookmarks/:id", bmH.Delete)
 
-		api.GET("/search", searchH.Search)
+		searchRL := middleware.NewRateLimiter(60, 1*time.Minute)
+		api.GET("/search", middleware.RateLimitByIP(searchRL), searchH.Search)
 
 		api.GET("/tags", tagH.List)
 		api.POST("/tags", tagH.Create)

@@ -30,6 +30,11 @@ func New(host, apiKey string) *Client {
 	return c
 }
 
+// initIndex creates the index and applies settings. Both are async tasks on the
+// MeiliSearch side — the settings (notably FilterableAttributes) may not be applied
+// before the first search request arrives at cold start. Transient 500 errors on the
+// first search after a fresh deployment are expected; they resolve once MeiliSearch
+// processes the settings task (usually <1s).
 func (c *Client) initIndex() {
 	if _, err := c.svc.CreateIndex(&meilisearch.IndexConfig{
 		Uid:        indexName,
