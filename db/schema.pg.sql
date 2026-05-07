@@ -196,3 +196,9 @@ CREATE INDEX IF NOT EXISTS idx_workspaces_user_seq  ON workspaces  (user_id, seq
 CREATE INDEX IF NOT EXISTS idx_collections_user_seq ON collections (user_id, seq);
 CREATE INDEX IF NOT EXISTS idx_bookmarks_user_seq   ON bookmarks   (user_id, seq);
 CREATE INDEX IF NOT EXISTS idx_tags_user_seq        ON tags        (user_id, seq);
+
+-- ── Redis migration: drop tables now managed by Cache/Limiter ────────────────
+DROP TABLE IF EXISTS sse_tokens;
+DROP TABLE IF EXISTS login_failures;
+DROP TABLE IF EXISTS otp_ip_requests;
+DROP TABLE IF EXISTS register_ip_requests;
