@@ -10,11 +10,17 @@ import (
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/model"
 	"github.com/tabslate/server/internal/plan"
+	"github.com/tabslate/server/internal/pubsub"
 )
 
-type CollectionHandler struct{ db *db.DB }
+type CollectionHandler struct {
+	db  *db.DB
+	hub pubsub.Hub
+}
 
-func NewCollectionHandler(d *db.DB) *CollectionHandler { return &CollectionHandler{db: d} }
+func NewCollectionHandler(d *db.DB, hub pubsub.Hub) *CollectionHandler {
+	return &CollectionHandler{db: d, hub: hub}
+}
 
 // GET /collections
 func (h *CollectionHandler) List(c *gin.Context) {
@@ -115,7 +121,7 @@ func (h *CollectionHandler) Create(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
 	c.JSON(http.StatusCreated, model.Collection{
 		ID: id, UserID: userID, WorkspaceID: req.WorkspaceID,
 		Name: req.Name, Icon: req.Icon, Position: req.Position,
@@ -168,7 +174,7 @@ func (h *CollectionHandler) Update(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
 	c.JSON(http.StatusOK, gin.H{"id": id, "seq": seq, "updated_at": now})
 }
 
@@ -210,6 +216,6 @@ func (h *CollectionHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
 	c.Status(http.StatusNoContent)
 }

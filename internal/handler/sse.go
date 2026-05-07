@@ -6,18 +6,23 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tabslate/server/db"
+	"github.com/tabslate/server/internal/pubsub"
+	"github.com/tabslate/server/internal/store"
 )
 
-type SSEHandler struct{ db *db.DB }
+type SSEHandler struct {
+	hub   pubsub.Hub
+	cache store.Cache
+}
 
-func NewSSEHandler(d *db.DB) *SSEHandler { return &SSEHandler{db: d} }
+func NewSSEHandler(hub pubsub.Hub, cache store.Cache) *SSEHandler {
+	return &SSEHandler{hub: hub, cache: cache}
+}
 
 // GET /sync/stream?token=<sse_token>
-// Streams server-sent events to the client. Sends {"seq": N} on every write
-// for the authenticated user. Keeps alive with ": ping" every 30 seconds.
-// Auth is via a single-use SSE token (issued by POST /auth/sse-token) because
-// EventSource cannot set Authorization headers.
+// Streams server-sent events to the client. Auth via single-use SSE token
+// stored in Cache (issued by POST /auth/sse-token). Keeps alive with ": ping"
+// every 30 seconds.
 func (h *SSEHandler) Stream(c *gin.Context) {
 	ctx := c.Request.Context()
 	token := c.Query("token")
@@ -26,21 +31,15 @@ func (h *SSEHandler) Stream(c *gin.Context) {
 		return
 	}
 
-	// Validate and consume the single-use SSE token atomically.
-	var userID string
-	var expiresAt int64
-	err := h.db.QueryRow(ctx,
-		`DELETE FROM sse_tokens WHERE token=$1 RETURNING user_id, expires_at`,
-		token,
-	).Scan(&userID, &expiresAt)
-	if err != nil {
+	// Validate and atomically consume the single-use token from cache.
+	val, found, err := h.cache.Get(ctx, "tabslate:sse_token:"+token)
+	if err != nil || !found {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired SSE token"})
 		return
 	}
-	if time.Now().UnixMilli() > expiresAt {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "SSE token expired"})
-		return
-	}
+	userID := string(val)
+	// Consume: delete so it cannot be reused.
+	h.cache.Del(ctx, "tabslate:sse_token:"+token)
 
 	w := c.Writer
 	flusher, ok := w.(http.Flusher)
@@ -52,12 +51,12 @@ func (h *SSEHandler) Stream(c *gin.Context) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no") // disable nginx buffering
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	connID, ch := globalHub.Subscribe(userID)
-	defer globalHub.Unsubscribe(userID, connID)
+	connID, ch := h.hub.Subscribe(userID)
+	defer h.hub.Unsubscribe(userID, connID)
 
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()

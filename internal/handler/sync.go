@@ -10,16 +10,18 @@ import (
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/model"
 	"github.com/tabslate/server/internal/plan"
+	"github.com/tabslate/server/internal/pubsub"
 	"github.com/tabslate/server/internal/search"
 )
 
 type SyncHandler struct {
 	db     *db.DB
 	search *search.Client
+	hub    pubsub.Hub
 }
 
-func NewSyncHandler(d *db.DB, sc *search.Client) *SyncHandler {
-	return &SyncHandler{db: d, search: sc}
+func NewSyncHandler(d *db.DB, sc *search.Client, hub pubsub.Hub) *SyncHandler {
+	return &SyncHandler{db: d, search: sc, hub: hub}
 }
 
 // POST /sync/push
@@ -177,7 +179,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
 
 	for _, doc := range searchUpserts {
 		h.search.UpsertBookmark(doc)

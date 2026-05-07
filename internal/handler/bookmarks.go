@@ -11,16 +11,18 @@ import (
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/model"
 	"github.com/tabslate/server/internal/plan"
+	"github.com/tabslate/server/internal/pubsub"
 	"github.com/tabslate/server/internal/search"
 )
 
 type BookmarkHandler struct {
 	db     *db.DB
 	search *search.Client
+	hub    pubsub.Hub
 }
 
-func NewBookmarkHandler(d *db.DB, sc *search.Client) *BookmarkHandler {
-	return &BookmarkHandler{db: d, search: sc}
+func NewBookmarkHandler(d *db.DB, sc *search.Client, hub pubsub.Hub) *BookmarkHandler {
+	return &BookmarkHandler{db: d, search: sc, hub: hub}
 }
 
 // GET /bookmarks?collection_id=&favorite=&archived=&trashed=
@@ -118,7 +120,7 @@ func (h *BookmarkHandler) Create(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
 	h.search.UpsertBookmark(search.BookmarkDoc{
 		ID:           id,
 		UserID:       userID,
@@ -185,7 +187,7 @@ func (h *BookmarkHandler) Update(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
 	if req.IsTrashed {
 		h.search.DeleteBookmark(id)
 	} else {
@@ -240,7 +242,7 @@ func (h *BookmarkHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
 	h.search.DeleteBookmark(id)
 	c.Status(http.StatusNoContent)
 }
