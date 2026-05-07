@@ -99,6 +99,10 @@ type Config struct {
 	// RateLimitSearch is the per-IP budget for GET /search. Defaults to 60/min.
 	RateLimitSearch       int
 	RateLimitSearchWindow time.Duration
+
+	// RedisURL is the optional Redis connection URL (e.g. "redis://localhost:6379").
+	// Leave empty to use in-memory implementations for all infra providers.
+	RedisURL string
 }
 
 // LoadConfig reads configuration from environment variables and fatals on any
@@ -146,6 +150,8 @@ func LoadConfig() *Config {
 		RateLimitSyncPullWindow: envDuration("RATE_LIMIT_SYNC_PULL_WINDOW", 1*time.Minute),
 		RateLimitSearch:         envInt("RATE_LIMIT_SEARCH", 60),
 		RateLimitSearchWindow:   envDuration("RATE_LIMIT_SEARCH_WINDOW", 1*time.Minute),
+
+		RedisURL: os.Getenv("REDIS_URL"),
 	}
 }
 
