@@ -36,11 +36,18 @@ func New(redisURL string) (*Providers, func(), error) {
 		return nil, nil, fmt.Errorf("parse REDIS_URL: %w", err)
 	}
 	rdb := redis.NewClient(opt)
+	success := false
+	defer func() {
+		if !success {
+			rdb.Close()
+		}
+	}()
 	hub := pubsub.NewRedisHub(rdb)
-	cleanup := func() { hub.Close(); rdb.Close() }
-	return &Providers{
+	p := &Providers{
 		Hub:     hub,
 		Cache:   store.NewRedisCache(rdb),
 		Limiter: ratelimit.NewRedisLimiter(rdb),
-	}, cleanup, nil
+	}
+	success = true
+	return p, func() { hub.Close(); rdb.Close() }, nil
 }
