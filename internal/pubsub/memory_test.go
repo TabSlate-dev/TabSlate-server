@@ -1,6 +1,8 @@
 package pubsub_test
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -78,4 +80,55 @@ func TestInMemoryHub_MultipleSubscribersAllReceive(t *testing.T) {
 			t.Fatal("timeout")
 		}
 	}
+}
+
+func TestInMemoryHub_CloseClosesAllChannels(t *testing.T) {
+	h := pubsub.NewInMemoryHub()
+
+	_, ch1 := h.Subscribe("user1")
+	_, ch2 := h.Subscribe("user2")
+
+	h.Close()
+
+	for _, ch := range []<-chan int64{ch1, ch2} {
+		select {
+		case _, ok := <-ch:
+			if ok {
+				t.Fatal("expected channel to be closed after Close()")
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("timeout: channel not closed after Close()")
+		}
+	}
+}
+
+func TestInMemoryHub_ConcurrentAccess(t *testing.T) {
+	h := pubsub.NewInMemoryHub()
+
+	const goroutines = 10
+	var wg sync.WaitGroup
+
+	// Start subscribers
+	for i := 0; i < goroutines; i++ {
+		userID := fmt.Sprintf("user%d", i)
+		connID, ch := h.Subscribe(userID)
+		go func(uid string, cid int64, c <-chan int64) {
+			for range c {
+			}
+			_ = cid
+		}(userID, connID, ch)
+	}
+
+	// Concurrent broadcasts
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			userID := fmt.Sprintf("user%d", i%goroutines)
+			h.Broadcast(userID, int64(i))
+		}(i)
+	}
+
+	wg.Wait()
+	h.Close()
 }

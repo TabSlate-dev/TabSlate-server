@@ -45,11 +45,16 @@ func (h *InMemoryHub) Unsubscribe(userID string, connID int64) {
 
 func (h *InMemoryHub) Broadcast(userID string, seq int64) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-	for _, ch := range h.subs[userID] {
+	conns := h.subs[userID]
+	snapshot := make([]chan int64, 0, len(conns))
+	for _, ch := range conns {
+		snapshot = append(snapshot, ch)
+	}
+	h.mu.RUnlock()
+	for _, ch := range snapshot {
 		select {
 		case ch <- seq:
-		default:
+		default: // slow consumer: drop rather than stall other subscribers
 		}
 	}
 }
