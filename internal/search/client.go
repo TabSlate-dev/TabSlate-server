@@ -1,8 +1,10 @@
 package search
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"time"
 
 	meilisearch "github.com/meilisearch/meilisearch-go"
 )
@@ -30,17 +32,24 @@ func New(host, apiKey string) *Client {
 	return c
 }
 
-// initIndex creates the index and applies settings. Both are async tasks on the
-// MeiliSearch side — the settings (notably FilterableAttributes) may not be applied
-// before the first search request arrives at cold start. Transient 500 errors on the
-// first search after a fresh deployment are expected; they resolve once MeiliSearch
-// processes the settings task (usually <1s).
+// initIndex creates the index and waits for it to be ready, then applies
+// settings. Waiting is necessary because MeiliSearch index creation is async —
+// without it, the first AddDocuments call races against index creation and gets
+// a 404. If the index already exists the wait is skipped.
 func (c *Client) initIndex() {
-	if _, err := c.svc.CreateIndex(&meilisearch.IndexConfig{
+	task, err := c.svc.CreateIndex(&meilisearch.IndexConfig{
 		Uid:        indexName,
 		PrimaryKey: "id",
-	}); err != nil {
+	})
+	if err != nil {
+		// Index likely already exists — that's fine.
 		log.Printf("[search] createIndex (may already exist): %v", err)
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := c.svc.WaitForTaskWithContext(ctx, task.TaskUID, 50*time.Millisecond); err != nil {
+			log.Printf("[search] wait for createIndex task: %v", err)
+		}
 	}
 	if _, err := c.index.UpdateSettings(&meilisearch.Settings{
 		FilterableAttributes: []string{"userId"},
