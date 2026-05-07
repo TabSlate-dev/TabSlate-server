@@ -2,7 +2,6 @@ package pubsub
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"strconv"
 	"sync"
@@ -76,7 +75,7 @@ func (h *RedisHub) readFromRedis(userID string, ps *redis.PubSub) {
 // all instances (including this one) receive the event exactly once.
 func (h *RedisHub) Broadcast(userID string, seq int64) {
 	if err := h.rdb.Publish(context.Background(), hubChannelPrefix+userID,
-		fmt.Sprintf("%d", seq)).Err(); err != nil {
+		strconv.FormatInt(seq, 10)).Err(); err != nil {
 		log.Printf("pubsub: publish for user %s: %v", userID, err)
 	}
 }
