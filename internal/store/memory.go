@@ -14,9 +14,10 @@ type cacheEntry struct {
 // InMemoryCache is a process-local Cache implementation with lazy TTL expiry
 // and a periodic background sweep every 30 seconds.
 type InMemoryCache struct {
-	mu   sync.RWMutex
-	data map[string]cacheEntry
-	done chan struct{}
+	mu        sync.RWMutex
+	data      map[string]cacheEntry
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func NewInMemoryCache() *InMemoryCache {
@@ -48,7 +49,9 @@ func (c *InMemoryCache) Get(_ context.Context, key string) ([]byte, bool, error)
 	}
 	if e.expireAt != 0 && time.Now().UnixNano() > e.expireAt {
 		c.mu.Lock()
-		delete(c.data, key)
+		if current, ok := c.data[key]; ok && current.expireAt != 0 && time.Now().UnixNano() > current.expireAt {
+			delete(c.data, key)
+		}
 		c.mu.Unlock()
 		return nil, false, nil
 	}
@@ -64,7 +67,7 @@ func (c *InMemoryCache) Del(_ context.Context, key string) error {
 
 // Close stops the background sweep goroutine.
 func (c *InMemoryCache) Close() {
-	close(c.done)
+	c.closeOnce.Do(func() { close(c.done) })
 }
 
 func (c *InMemoryCache) sweep() {
