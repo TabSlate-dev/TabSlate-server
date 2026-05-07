@@ -11,11 +11,19 @@ import (
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/model"
 	"github.com/tabslate/server/internal/plan"
+	"github.com/tabslate/server/internal/pubsub"
+	"github.com/tabslate/server/internal/search"
 )
 
-type BookmarkHandler struct{ db *db.DB }
+type BookmarkHandler struct {
+	db     *db.DB
+	search *search.Client
+	hub    pubsub.Hub
+}
 
-func NewBookmarkHandler(d *db.DB) *BookmarkHandler { return &BookmarkHandler{db: d} }
+func NewBookmarkHandler(d *db.DB, sc *search.Client, hub pubsub.Hub) *BookmarkHandler {
+	return &BookmarkHandler{db: d, search: sc, hub: hub}
+}
 
 // GET /bookmarks?collection_id=&favorite=&archived=&trashed=
 func (h *BookmarkHandler) List(c *gin.Context) {
@@ -112,7 +120,16 @@ func (h *BookmarkHandler) Create(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
+	h.search.UpsertBookmark(search.BookmarkDoc{
+		ID:           id,
+		UserID:       userID,
+		Title:        req.Title,
+		URL:          req.URL,
+		Description:  req.Description,
+		CollectionID: derefStr(req.CollectionID),
+		IsArchived:   req.IsArchived,
+	})
 	c.JSON(http.StatusCreated, model.Bookmark{
 		ID: id, UserID: userID, CollectionID: req.CollectionID,
 		Title: req.Title, URL: req.URL, FaviconURL: req.FaviconURL,
@@ -170,7 +187,20 @@ func (h *BookmarkHandler) Update(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
+	if req.IsTrashed {
+		h.search.DeleteBookmark(id)
+	} else {
+		h.search.UpsertBookmark(search.BookmarkDoc{
+			ID:           id,
+			UserID:       userID,
+			Title:        req.Title,
+			URL:          req.URL,
+			Description:  req.Description,
+			CollectionID: derefStr(req.CollectionID),
+			IsArchived:   req.IsArchived,
+		})
+	}
 	c.JSON(http.StatusOK, gin.H{"id": id, "seq": seq, "updated_at": now})
 }
 
@@ -212,6 +242,14 @@ func (h *BookmarkHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
+	h.search.DeleteBookmark(id)
 	c.Status(http.StatusNoContent)
+}
+
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

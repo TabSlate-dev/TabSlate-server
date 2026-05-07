@@ -73,6 +73,36 @@ type Config struct {
 	// OTPCaptchaWindow is the look-back period for per-IP OTP request counting.
 	// Accepts any Go duration string. Defaults to 15m.
 	OTPCaptchaWindow time.Duration
+
+	// ── MeiliSearch ──────────────────────────────────────────────────────────────
+	// MeiliSearchHost is the internal URL of the MeiliSearch instance,
+	// e.g. "http://meilisearch:7700". Leave empty to disable search indexing.
+	MeiliSearchHost string
+
+	// MeiliSearchAPIKey is the master or admin API key for MeiliSearch.
+	MeiliSearchAPIKey string
+
+	// ── Rate limiters ────────────────────────────────────────────────────────────
+	// RateLimitAuth is the maximum number of requests per RateLimitAuthWindow
+	// allowed per IP on auth endpoints (register, login, resend, verify, OTP).
+	// Defaults to 10.
+	RateLimitAuth       int
+	RateLimitAuthWindow time.Duration
+
+	// RateLimitSyncPush / RateLimitSyncPull control per-IP request budgets for
+	// the sync endpoints. Defaults: 60 push / 120 pull per minute.
+	RateLimitSyncPush       int
+	RateLimitSyncPushWindow time.Duration
+	RateLimitSyncPull       int
+	RateLimitSyncPullWindow time.Duration
+
+	// RateLimitSearch is the per-IP budget for GET /search. Defaults to 60/min.
+	RateLimitSearch       int
+	RateLimitSearchWindow time.Duration
+
+	// RedisURL is the optional Redis connection URL (e.g. "redis://localhost:6379").
+	// Leave empty to use in-memory implementations for all infra providers.
+	RedisURL string
 }
 
 // LoadConfig reads configuration from environment variables and fatals on any
@@ -107,6 +137,21 @@ func LoadConfig() *Config {
 		// OTP resend captcha
 		OTPCaptchaThreshold: envInt("OTP_CAPTCHA_THRESHOLD", 5),
 		OTPCaptchaWindow:    envDuration("OTP_CAPTCHA_WINDOW", 15*time.Minute),
+
+		MeiliSearchHost:   os.Getenv("MEILISEARCH_HOST"),
+		MeiliSearchAPIKey: os.Getenv("MEILISEARCH_API_KEY"),
+
+		// Rate limiters
+		RateLimitAuth:           envInt("RATE_LIMIT_AUTH", 10),
+		RateLimitAuthWindow:     envDuration("RATE_LIMIT_AUTH_WINDOW", 1*time.Minute),
+		RateLimitSyncPush:       envInt("RATE_LIMIT_SYNC_PUSH", 60),
+		RateLimitSyncPushWindow: envDuration("RATE_LIMIT_SYNC_PUSH_WINDOW", 1*time.Minute),
+		RateLimitSyncPull:       envInt("RATE_LIMIT_SYNC_PULL", 120),
+		RateLimitSyncPullWindow: envDuration("RATE_LIMIT_SYNC_PULL_WINDOW", 1*time.Minute),
+		RateLimitSearch:         envInt("RATE_LIMIT_SEARCH", 60),
+		RateLimitSearchWindow:   envDuration("RATE_LIMIT_SEARCH_WINDOW", 1*time.Minute),
+
+		RedisURL: os.Getenv("REDIS_URL"),
 	}
 }
 

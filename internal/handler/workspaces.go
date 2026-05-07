@@ -10,11 +10,17 @@ import (
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/model"
 	"github.com/tabslate/server/internal/plan"
+	"github.com/tabslate/server/internal/pubsub"
 )
 
-type WorkspaceHandler struct{ db *db.DB }
+type WorkspaceHandler struct {
+	db  *db.DB
+	hub pubsub.Hub
+}
 
-func NewWorkspaceHandler(d *db.DB) *WorkspaceHandler { return &WorkspaceHandler{db: d} }
+func NewWorkspaceHandler(d *db.DB, hub pubsub.Hub) *WorkspaceHandler {
+	return &WorkspaceHandler{db: d, hub: hub}
+}
 
 // GET /workspaces
 func (h *WorkspaceHandler) List(c *gin.Context) {
@@ -85,7 +91,7 @@ func (h *WorkspaceHandler) Create(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
 	c.JSON(http.StatusCreated, model.Workspace{
 		ID: id, UserID: userID,
 		Name: req.Name, Icon: req.Icon, Color: req.Color, Position: req.Position,
@@ -138,7 +144,7 @@ func (h *WorkspaceHandler) Update(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
 	c.JSON(http.StatusOK, gin.H{"id": id, "seq": seq, "updated_at": now})
 }
 
@@ -180,6 +186,6 @@ func (h *WorkspaceHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
 	c.Status(http.StatusNoContent)
 }

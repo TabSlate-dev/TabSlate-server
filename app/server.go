@@ -14,21 +14,26 @@ import (
 	"github.com/tabslate/server/db"
 	"github.com/tabslate/server/internal/captcha"
 	"github.com/tabslate/server/internal/handler"
+	"github.com/tabslate/server/internal/infra"
 	"github.com/tabslate/server/internal/mailer"
 	"github.com/tabslate/server/internal/middleware"
+	"github.com/tabslate/server/internal/search"
 )
 
 // Server is the HTTP server for the TabSlate backend.
 // It is constructed with all dependencies injected so that the Cloud edition
 // can reuse it with a different billing.Provider.
 type Server struct {
-	cfg     *Config
-	db      *db.DB
-	billing billing.Provider
-	captcha *captcha.Verifier
-	mailer  *mailer.Mailer
-	router  *gin.Engine
-	ctx     context.Context
+	cfg          *Config
+	db           *db.DB
+	billing      billing.Provider
+	captcha      *captcha.Verifier
+	mailer       *mailer.Mailer
+	search       *search.Client
+	router       *gin.Engine
+	ctx          context.Context
+	infra        *infra.Providers
+	infraCleanup func()
 }
 
 // New creates and configures the server. Captcha and mailer services are
@@ -64,14 +69,29 @@ func New(cfg *Config, database *db.DB, bp billing.Provider, ctx context.Context)
 		log.Println("email disabled — users will be auto-verified")
 	}
 
+	sc := search.New(cfg.MeiliSearchHost, cfg.MeiliSearchAPIKey)
+	if sc != nil {
+		log.Println("meilisearch search indexing enabled")
+	} else {
+		log.Println("meilisearch not configured — search indexing disabled")
+	}
+
+	infraProviders, infraCleanup, err := infra.New(cfg.RedisURL)
+	if err != nil {
+		log.Fatalf("infra: %v", err)
+	}
+
 	s := &Server{
-		cfg:     cfg,
-		db:      database,
-		billing: bp,
-		captcha: cv,
-		mailer:  m,
-		router:  gin.Default(),
-		ctx:     ctx,
+		cfg:          cfg,
+		db:           database,
+		billing:      bp,
+		captcha:      cv,
+		mailer:       m,
+		search:       sc,
+		router:       gin.Default(),
+		ctx:          ctx,
+		infra:        infraProviders,
+		infraCleanup: infraCleanup,
 	}
 	s.setupCORS()
 	s.setupRoutes()
@@ -128,6 +148,7 @@ func (s *Server) Run() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("server shutdown: %v", err)
 	}
+	s.infraCleanup()
 }
 
 func (s *Server) setupCORS() {
@@ -146,24 +167,18 @@ func (s *Server) setupCORS() {
 
 func (s *Server) setupRoutes() {
 	authH := handler.NewAuthHandler(s.db, s.cfg.JWTSecret, s.billing, s.captcha, s.mailer,
+		s.infra.Limiter, s.infra.Cache,
 		s.cfg.RegisterCaptchaThreshold, s.cfg.RegisterCaptchaWindow,
 		s.cfg.OTPCaptchaThreshold, s.cfg.OTPCaptchaWindow)
-	authH.StartCleanup(s.ctx)
 	captchaH := handler.NewCaptchaHandler(s.cfg.ProsopoBundleURL)
-	wsH := handler.NewWorkspaceHandler(s.db)
-	colH := handler.NewCollectionHandler(s.db)
-	bmH := handler.NewBookmarkHandler(s.db)
-	tagH := handler.NewTagHandler(s.db)
-	syncH := handler.NewSyncHandler(s.db)
-	sseH := handler.NewSSEHandler(s.db)
-	billH := handler.NewBillingHandler(s.billing)
-
-	// ── Rate limiters ─────────────────────────────────────────────────────────
-	// 10 requests/minute per IP for auth endpoints (register, login, resend).
-	authRL := middleware.NewRateLimiter(10, 1*time.Minute)
-	// 60 req/min per IP for sync push, 120 req/min per IP for sync pull.
-	syncPushRL := middleware.NewRateLimiter(60, 1*time.Minute)
-	syncPullRL := middleware.NewRateLimiter(120, 1*time.Minute)
+	wsH := handler.NewWorkspaceHandler(s.db, s.infra.Hub)
+	colH := handler.NewCollectionHandler(s.db, s.infra.Hub)
+	bmH := handler.NewBookmarkHandler(s.db, s.search, s.infra.Hub)
+	tagH := handler.NewTagHandler(s.db, s.infra.Hub)
+	syncH := handler.NewSyncHandler(s.db, s.search, s.infra.Hub)
+	searchH := handler.NewSearchHandler(s.search)
+	sseH := handler.NewSSEHandler(s.infra.Hub, s.infra.Cache)
+	billH := handler.NewBillingHandler(s.billing, s.infra.Cache)
 
 	// ── Public routes ─────────────────────────────────────────────────────────
 	s.router.GET("/captcha/widget", captchaH.Widget)
@@ -171,14 +186,14 @@ func (s *Server) setupRoutes() {
 
 	auth := s.router.Group("/auth")
 	{
-		auth.POST("/register", middleware.RateLimitByIP(authRL), authH.Register)
-		auth.POST("/login", middleware.RateLimitByIP(authRL), authH.Login)
+		auth.POST("/register", middleware.RateLimitByIP(s.infra.Limiter, s.cfg.RateLimitAuth, s.cfg.RateLimitAuthWindow), authH.Register)
+		auth.POST("/login", middleware.RateLimitByIP(s.infra.Limiter, s.cfg.RateLimitAuth, s.cfg.RateLimitAuthWindow), authH.Login)
 		auth.POST("/refresh", authH.Refresh)
 		auth.POST("/logout", authH.Logout)
-		auth.POST("/verify-email", middleware.RateLimitByIP(authRL), authH.VerifyEmail)
-		auth.POST("/resend-verification", middleware.RateLimitByIP(authRL), authH.ResendVerification)
-		auth.POST("/forgot-password", middleware.RateLimitByIP(authRL), authH.ForgotPassword)
-		auth.POST("/reset-password", middleware.RateLimitByIP(authRL), authH.ResetPassword)
+		auth.POST("/verify-email", middleware.RateLimitByIP(s.infra.Limiter, s.cfg.RateLimitAuth, s.cfg.RateLimitAuthWindow), authH.VerifyEmail)
+		auth.POST("/resend-verification", middleware.RateLimitByIP(s.infra.Limiter, s.cfg.RateLimitAuth, s.cfg.RateLimitAuthWindow), authH.ResendVerification)
+		auth.POST("/forgot-password", middleware.RateLimitByIP(s.infra.Limiter, s.cfg.RateLimitAuth, s.cfg.RateLimitAuthWindow), authH.ForgotPassword)
+		auth.POST("/reset-password", middleware.RateLimitByIP(s.infra.Limiter, s.cfg.RateLimitAuth, s.cfg.RateLimitAuthWindow), authH.ResetPassword)
 		auth.GET("/login-captcha-status", authH.LoginCaptchaStatus)
 		auth.GET("/otp-captcha-status", authH.OTPCaptchaStatus)
 		auth.GET("/register-captcha-status", authH.RegisterCaptchaStatus)
@@ -208,6 +223,8 @@ func (s *Server) setupRoutes() {
 		api.PUT("/bookmarks/:id", bmH.Update)
 		api.DELETE("/bookmarks/:id", bmH.Delete)
 
+		api.GET("/search", middleware.RateLimitByIP(s.infra.Limiter, s.cfg.RateLimitSearch, s.cfg.RateLimitSearchWindow), searchH.Search)
+
 		api.GET("/tags", tagH.List)
 		api.POST("/tags", tagH.Create)
 		api.PUT("/tags/:id", tagH.Update)
@@ -218,8 +235,8 @@ func (s *Server) setupRoutes() {
 		api.POST("/sync/push", func(c *gin.Context) {
 			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 512*1024)
 			c.Next()
-		}, middleware.RateLimitByIP(syncPushRL), syncH.Push)
-		api.GET("/sync/pull", middleware.RateLimitByIP(syncPullRL), syncH.Pull)
+		}, middleware.RateLimitByIP(s.infra.Limiter, s.cfg.RateLimitSyncPush, s.cfg.RateLimitSyncPushWindow), syncH.Push)
+		api.GET("/sync/pull", middleware.RateLimitByIP(s.infra.Limiter, s.cfg.RateLimitSyncPull, s.cfg.RateLimitSyncPullWindow), syncH.Pull)
 
 		// Billing — behaviour varies by provider (OSS vs Cloud)
 		bill := api.Group("/api")

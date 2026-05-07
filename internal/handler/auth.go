@@ -20,6 +20,8 @@ import (
 	"github.com/tabslate/server/internal/mailer"
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/model"
+	"github.com/tabslate/server/internal/ratelimit"
+	"github.com/tabslate/server/internal/store"
 )
 
 const (
@@ -44,6 +46,8 @@ type AuthHandler struct {
 	billing billing.Provider
 	captcha *captcha.Verifier
 	mailer  *mailer.Mailer
+	limiter ratelimit.Limiter
+	cache   store.Cache
 
 	registerCaptchaThreshold int
 	registerCaptchaWindow    time.Duration
@@ -58,6 +62,8 @@ func NewAuthHandler(
 	bp billing.Provider,
 	cv *captcha.Verifier,
 	m *mailer.Mailer,
+	l ratelimit.Limiter,
+	cache store.Cache,
 	registerThreshold int,
 	registerWindow time.Duration,
 	otpThreshold int,
@@ -69,6 +75,8 @@ func NewAuthHandler(
 		billing:                  bp,
 		captcha:                  cv,
 		mailer:                   m,
+		limiter:                  l,
+		cache:                    cache,
 		registerCaptchaThreshold: registerThreshold,
 		registerCaptchaWindow:    registerWindow,
 		otpCaptchaThreshold:      otpThreshold,
@@ -221,7 +229,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	// Clear failures on success.
-	h.db.Exec(ctx, `DELETE FROM login_failures WHERE email = $1`, req.Email)
+	h.limiter.ResetCounter(ctx, "tabslate:auth:login_fail:"+req.Email)
 
 	// If the user hasn't verified their email yet, refresh the OTP so they
 	// always have a fresh code when they arrive at the verification screen.
@@ -665,91 +673,30 @@ func (h *AuthHandler) issueTokens(user *model.User) (*model.AuthResponse, error)
 }
 
 func (h *AuthHandler) loginFailureCount(ctx context.Context, email string) int {
-	cutoff := time.Now().Add(-loginFailureWindow).Unix()
-	var count int
-	h.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM login_failures WHERE email = $1 AND failed_at > $2`,
-		email, cutoff,
-	).Scan(&count)
-	return count
+	count, _ := h.limiter.GetCounter(ctx, "tabslate:auth:login_fail:"+email)
+	return int(count)
 }
 
 func (h *AuthHandler) recordLoginFailure(ctx context.Context, email string) {
-	now := time.Now().Unix()
-	h.db.Exec(ctx, `INSERT INTO login_failures (email, failed_at) VALUES ($1, $2)`, email, now)
+	h.limiter.IncrCounter(ctx, "tabslate:auth:login_fail:"+email, loginFailureWindow)
 }
 
-// otpIPRequestCount returns how many OTP requests originated from ip within otpIPWindow.
 func (h *AuthHandler) otpIPRequestCount(ctx context.Context, ip string) int {
-	cutoff := time.Now().Add(-h.otpCaptchaWindow).Unix()
-	var count int
-	h.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM otp_ip_requests WHERE ip = $1 AND requested_at > $2`,
-		ip, cutoff,
-	).Scan(&count)
-	return count
+	count, _ := h.limiter.GetCounter(ctx, "tabslate:auth:otp_ip:"+ip)
+	return int(count)
 }
 
-// recordOTPIPRequest inserts a new OTP request row for ip.
 func (h *AuthHandler) recordOTPIPRequest(ctx context.Context, ip string) {
-	h.db.Exec(ctx,
-		`INSERT INTO otp_ip_requests (ip, requested_at) VALUES ($1, $2)`,
-		ip, time.Now().Unix(),
-	)
+	h.limiter.IncrCounter(ctx, "tabslate:auth:otp_ip:"+ip, h.otpCaptchaWindow)
 }
 
-// StartCleanup launches a background goroutine that periodically deletes
-// expired rows from the three rate-limit tables. It runs every 10 minutes
-// and removes rows that are older than their respective look-back windows,
-// since those rows can never influence a rate-limit decision again.
-// The goroutine stops when ctx is cancelled.
-func (h *AuthHandler) StartCleanup(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Minute)
-	go func() {
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				h.cleanupExpiredRateLimitRows()
-			}
-		}
-	}()
-}
-
-func (h *AuthHandler) cleanupExpiredRateLimitRows() {
-	ctx := context.Background()
-	now := time.Now().Unix()
-
-	loginCutoff := now - int64(loginFailureWindow.Seconds())
-	h.db.Exec(ctx, `DELETE FROM login_failures WHERE failed_at < $1`, loginCutoff)
-
-	otpCutoff := now - int64(h.otpCaptchaWindow.Seconds())
-	h.db.Exec(ctx, `DELETE FROM otp_ip_requests WHERE requested_at < $1`, otpCutoff)
-
-	regCutoff := now - int64(h.registerCaptchaWindow.Seconds())
-	h.db.Exec(ctx, `DELETE FROM register_ip_requests WHERE registered_at < $1`, regCutoff)
-}
-
-// registerIPRequestCount returns how many successful registrations originated
-// from ip within registerCaptchaWindow.
 func (h *AuthHandler) registerIPRequestCount(ctx context.Context, ip string) int {
-	cutoff := time.Now().Add(-h.registerCaptchaWindow).Unix()
-	var count int
-	h.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM register_ip_requests WHERE ip = $1 AND registered_at > $2`,
-		ip, cutoff,
-	).Scan(&count)
-	return count
+	count, _ := h.limiter.GetCounter(ctx, "tabslate:auth:reg_ip:"+ip)
+	return int(count)
 }
 
-// recordRegisterIPRequest inserts a successful registration row for ip.
 func (h *AuthHandler) recordRegisterIPRequest(ctx context.Context, ip string) {
-	h.db.Exec(ctx,
-		`INSERT INTO register_ip_requests (ip, registered_at) VALUES ($1, $2)`,
-		ip, time.Now().Unix(),
-	)
+	h.limiter.IncrCounter(ctx, "tabslate:auth:reg_ip:"+ip, h.registerCaptchaWindow)
 }
 
 // sendOTPEmail sends a 6-digit OTP email. purpose: "verify" or "reset".
@@ -817,27 +764,16 @@ func validatePasswordStrength(password string) error {
 }
 
 // POST /auth/sse-token
-// Issues a single-use, 30-second SSE authentication token.
-// The frontend calls this before opening the EventSource connection because
-// EventSource cannot set Authorization headers.
+// Issues a single-use, 30-second SSE authentication token stored in Cache.
 func (h *AuthHandler) IssueSSEToken(c *gin.Context) {
 	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
-	now := time.Now().UnixMilli()
-	expiresAt := now + 30_000 // 30 seconds
-
 	token := uuid.NewString()
 
-	if _, err := h.db.Exec(ctx,
-		`INSERT INTO sse_tokens (token, user_id, expires_at) VALUES ($1, $2, $3)`,
-		token, userID, expiresAt,
-	); err != nil {
+	if err := h.cache.Set(ctx, "tabslate:sse_token:"+token, []byte(userID), 30*time.Second); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue SSE token"})
 		return
 	}
-
-	// Purge expired tokens for this user to keep the table clean.
-	h.db.Exec(ctx, `DELETE FROM sse_tokens WHERE user_id = $1 AND expires_at < $2`, userID, now)
 
 	c.JSON(http.StatusOK, gin.H{"token": token})
 }

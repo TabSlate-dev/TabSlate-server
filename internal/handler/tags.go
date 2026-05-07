@@ -10,11 +10,17 @@ import (
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/model"
 	"github.com/tabslate/server/internal/plan"
+	"github.com/tabslate/server/internal/pubsub"
 )
 
-type TagHandler struct{ db *db.DB }
+type TagHandler struct {
+	db  *db.DB
+	hub pubsub.Hub
+}
 
-func NewTagHandler(d *db.DB) *TagHandler { return &TagHandler{db: d} }
+func NewTagHandler(d *db.DB, hub pubsub.Hub) *TagHandler {
+	return &TagHandler{db: d, hub: hub}
+}
 
 // GET /tags
 func (h *TagHandler) List(c *gin.Context) {
@@ -84,7 +90,7 @@ func (h *TagHandler) Create(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
 	c.JSON(http.StatusCreated, model.Tag{ID: id, UserID: userID, Name: req.Name, Color: req.Color, Seq: seq})
 }
 
@@ -131,7 +137,7 @@ func (h *TagHandler) Update(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
 	c.JSON(http.StatusOK, gin.H{"id": id, "seq": seq})
 }
 
@@ -172,6 +178,6 @@ func (h *TagHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	globalHub.Broadcast(userID, seq)
+	h.hub.Broadcast(userID, seq)
 	c.Status(http.StatusNoContent)
 }
