@@ -7,6 +7,7 @@ TabSlate-server 是 TabSlate Chrome 扩展的后端，Go 编写，Gin + pgx/v5 +
 ```
 cmd/server/main.go
   └── app.New(cfg, db, billingProvider, ctx)
+        ├── internal/infra       Hub / Cache / Limiter 工厂（REDIS_URL 为空 = in-memory）
         ├── internal/handler/*   HTTP handlers（各实体 + 认证 + 同步 + SSE）
         ├── internal/middleware  Auth JWT + IP 速率限制
         ├── billing.Provider     接口，OSS = local.Provider；Cloud = lago.Provider
@@ -37,14 +38,28 @@ TabSlate-server/
     ├── auth/                # JWT 签发/验证（HS256）、bcrypt、refresh token 生成
     ├── captcha/             # Prosopo procaptcha 验证；PROSOPO_SECRET 为空则跳过
     ├── mailer/              # 邮件发送：SMTP 或 Resend；MAIL_PROVIDER 为空则禁用
+    ├── infra/
+    │   └── infra.go         # Providers 工厂：REDIS_URL 非空 → Redis；空 → in-memory（OSS 单机）
     ├── middleware/
     │   ├── auth.go          # Bearer JWT 验证中间件
-    │   └── ratelimit.go     # IP 速率限制（滑动窗口，in-memory）；各端点限流值通过环境变量配置
+    │   └── ratelimit.go     # RateLimitByIP(limiter, limit, window)：接受 ratelimit.Limiter 接口
     ├── model/               # 请求/响应结构体、Plan 常量
     ├── plan/                # 本地 DB 配额检查（过渡期）
+    ├── pubsub/
+    │   ├── hub.go           # Hub 接口：Subscribe / Broadcast / Unsubscribe
+    │   ├── memory.go        # InMemoryHub（OSS 单机）
+    │   └── redis.go         # RedisHub（多实例，Redis pub/sub，key = tabslate:sync:<userID>）
+    ├── ratelimit/
+    │   ├── limiter.go       # Limiter 接口：Allow（滑动窗口）/ IncrCounter / ResetCounter / GetCounter
+    │   ├── memory.go        # InMemoryLimiter（OSS 单机）
+    │   └── redis.go         # RedisLimiter（多实例；Allow 用 sorted-set Lua 脚本，IncrCounter 用原子 Lua 脚本）
     ├── search/
     │   ├── types.go         # BookmarkDoc（MeiliSearch 文档结构）
     │   └── client.go        # Client：nil-safe 包装器；MEILISEARCH_HOST 为空时返回 nil（禁用）
+    ├── store/
+    │   ├── cache.go         # Cache 接口：Set / Get / Del（带 TTL）
+    │   ├── memory.go        # InMemoryCache（lazy 过期 + 30s 后台清扫）
+    │   └── redis.go         # RedisCache（TTL 由 Redis 原生管理）
     └── handler/
         ├── auth.go          # 注册、登录、OTP 验证、密码重置、SSE token 签发
         ├── workspaces.go    # CRUD /workspaces
@@ -54,9 +69,8 @@ TabSlate-server/
         ├── sync.go          # POST /sync/push、GET /sync/pull；Push 提交后批量触发 MeiliSearch 更新
         ├── sync_seq.go      # incrementSeq / currentSeq（per-user 单调序列）
         ├── search.go        # GET /search?q=（书签全文搜索；最少 2 个 Unicode 字符；需 Bearer JWT）
-        ├── sse.go           # GET /sync/stream（SSE 流）
-        ├── sse_hub.go       # globalHub：in-memory pub/sub（userID → connID → chan int64）
-        ├── billing.go       # GET+POST /api/subscription、/api/limits 等
+        ├── sse.go           # GET /sync/stream（SSE 流；通过 pubsub.Hub 接收广播）
+        ├── billing.go       # GET+POST /api/subscription、/api/limits（limits 60s 缓存）
         └── captcha.go       # GET /captcha/widget、/captcha/widget.js
 ```
 
@@ -111,7 +125,7 @@ POST /sync/push  →  SyncHandler.Push
   4. LWW upsert workspaces / collections / bookmarks / tags（各自独立 ON CONFLICT）
   5. incrementSeq → 新 seq
   6. 提交事务
-  7. globalHub.Broadcast(userID, seq)  // 通知所有 SSE 连接
+  7. h.hub.Broadcast(userID, seq)       // 通知所有 SSE 连接（in-memory 或 Redis pub/sub）
   8. 对成功 upsert 的书签触发 MeiliSearch upsert/delete（事务提交后，fire-and-forget）
   9. 返回 { server_seq, rejected: [] }
 ```
@@ -132,31 +146,31 @@ GET /sync/pull?after_seq=N  →  SyncHandler.Pull
 
 ```
 GET /sync/stream?token=<token>  →  SSEHandler.Stream
-  1. DELETE FROM sse_tokens WHERE token=$1 RETURNING user_id, expires_at
-     （单次消耗，过期或不存在 → 401）
+  1. cache.Get("tabslate:sse_token:<token>") → userID（miss 或 err → 401）
+     cache.Del("tabslate:sse_token:<token>")  // 单次消耗
   2. 设置 SSE 响应头（text/event-stream, no-cache, X-Accel-Buffering: no）
-  3. globalHub.Subscribe(userID) → connID, seqChan
+  3. hub.Subscribe(userID) → connID, seqChan
   4. 事件循环：
      - seqChan 收到 seq → 写 data: {"seq": N}\n\n
      - 每 30s 写 : ping\n\n（心跳，防止代理超时）
      - 写入失败 → 退出循环
      - c.Request.Context().Done() → 退出循环
-  5. globalHub.Unsubscribe(userID, connID)
+  5. hub.Unsubscribe(userID, connID)
 ```
 
-### SSE Hub
+### Hub（pubsub 包）
 
-`sse_hub.go` 中的 `globalHub` 是进程内 pub/sub：
+`internal/pubsub.Hub` 接口，两种实现：
 
-```
-Hub
-  subs: map[userID] → map[connID] → chan int64（缓冲 8）
-  next: atomic.Int64（connID 生成器）
-```
+| 实现 | 使用场景 | 说明 |
+|---|---|---|
+| `InMemoryHub` | OSS 单机（`REDIS_URL` 未设置） | 进程内 map + buffered channel（缓冲 8） |
+| `RedisHub` | Cloud / 多实例 | Redis pub/sub，channel key = `tabslate:sync:<userID>` |
 
-- `Subscribe`：加 RWMutex 写锁，创建 connID + buffered channel
-- `Broadcast`：加读锁，非阻塞发送（`select { case ch <- seq: default: }`），慢连接直接跳过
-- `Unsubscribe`：加写锁，close channel + 清理 map
+- `Subscribe`：返回 `(connID int64, ch <-chan int64)`
+- `Broadcast`：快照当前订阅者 channel 列表，释放锁后非阻塞发送（慢消费者直接跳过）
+- `Unsubscribe`：关闭 channel，清理 map；Redis 模式下最后一个连接离开时取消订阅
+- `infra.New()` 根据 `REDIS_URL` 自动选择实现并返回 cleanup 函数
 
 ### 序列号辅助函数（sync_seq.go）
 
@@ -176,7 +190,6 @@ currentSeq(ctx, d *db.DB, userID) (int64, error)
 |---|---|---|
 | `users` | id, email, password_hash, is_verified | 用户基础信息 |
 | `user_sync_seq` | user_id PK, seq BIGINT | 每用户同步序列计数器 |
-| `sse_tokens` | token PK, user_id, expires_at BIGINT | 30s 单次 SSE 鉴权令牌 |
 | `workspaces` | id, user_id, seq, deleted_at | 含同步字段 |
 | `collections` | id, user_id, workspace_id, seq, deleted_at, archived_at | 含同步字段；`archived_at` 非空 = 已归档（不计入配额，不显示在侧边栏） |
 | `bookmarks` | id, user_id, collection_id, seq, deleted_at, tag_ids text[] | 含同步字段；`tag_ids` 存书签关联的 Tag ID 数组 |
@@ -218,13 +231,14 @@ CREATE INDEX idx_tags_user_seq        ON tags        (user_id, seq);
 cmd/server/main.go
   → local.New(licenseKey)                    # OSS billing.Provider
   → app.New(cfg, db, provider, ctx)
+      ├── infra.New(cfg.RedisURL)            # Providers{Hub, Cache, Limiter}；空 = in-memory
       ├── captcha.New(cfg.ProsopoSecret, ...)
       ├── mailer.New(cfg.MailProvider, ...)
       ├── search.New(cfg.MeiliSearchHost, cfg.MeiliSearchAPIKey)  # nil if not configured
-      └── handler.New*(db, search, ...)      # bookmarks/sync/search handler 持有 *search.Client
+      └── handler.New*(db, infra, search, ...)  # 各 handler 注入 Hub/Cache/Limiter
 ```
 
-Cloud 仓库只需将 `local.New(...)` 替换为 `lago.New(...)`，并调用 `s.RegisterWebhook("/webhooks/lago", lagoHandler)` 即可。
+Cloud 仓库只需将 `local.New(...)` 替换为 `lago.New(...)`，设置 `REDIS_URL`，并调用 `s.RegisterWebhook("/webhooks/lago", lagoHandler)` 即可实现水平扩展。
 
 ## 认证机制
 
@@ -233,4 +247,4 @@ Cloud 仓库只需将 `local.New(...)` 替换为 `lago.New(...)`，并调用 `s.
 | Access token | HMAC HS256 JWT | 7 天 | 响应体，客户端内存 |
 | Refresh token | 32 字节随机，SHA-256 哈希 | 90 天，使用后轮换 | DB `refresh_tokens` |
 | OTP（邮箱验证/密码重置） | 6 位随机数字，SHA-256 哈希 | 10 分钟，5 次失败后失效 | DB `users.verification_token` / `reset_otp_hash` |
-| SSE token | 32 字节随机，明文 | 30 秒，单次消耗 | DB `sse_tokens` |
+| SSE token | UUID v4，明文 | 30 秒，单次消耗 | Cache（`tabslate:sse_token:<token>`） |
