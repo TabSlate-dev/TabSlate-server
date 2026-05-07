@@ -141,7 +141,6 @@ func (s *Server) Run() {
 	}()
 
 	<-s.ctx.Done()
-	s.infraCleanup()
 	log.Println("shutting down...")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -149,6 +148,7 @@ func (s *Server) Run() {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("server shutdown: %v", err)
 	}
+	s.infraCleanup()
 }
 
 func (s *Server) setupCORS() {
