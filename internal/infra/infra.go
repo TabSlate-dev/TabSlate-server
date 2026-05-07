@@ -2,6 +2,7 @@ package infra
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/tabslate/server/internal/pubsub"
@@ -21,6 +22,7 @@ type Providers struct {
 // The returned cleanup function must be called on process shutdown.
 func New(redisURL string) (*Providers, func(), error) {
 	if redisURL == "" {
+		log.Println("infra: using in-memory providers (OSS mode)")
 		hub := pubsub.NewInMemoryHub()
 		cache := store.NewInMemoryCache()
 		cleanup := func() { hub.Close(); cache.Close() }
@@ -35,6 +37,7 @@ func New(redisURL string) (*Providers, func(), error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse REDIS_URL: %w", err)
 	}
+	log.Printf("infra: using Redis providers (%s)", opt.Addr)
 	rdb := redis.NewClient(opt)
 	success := false
 	defer func() {
