@@ -149,6 +149,11 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_column THEN NULL;
 END $$;
 
+DO $$ BEGIN
+    ALTER TABLE users ADD COLUMN preferences JSONB NOT NULL DEFAULT '{}';
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
+
 -- Per-IP OTP request log (for captcha threshold enforcement)
 CREATE TABLE IF NOT EXISTS otp_ip_requests (
     ip           TEXT   NOT NULL,

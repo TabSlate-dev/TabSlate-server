@@ -179,6 +179,7 @@ func (s *Server) setupRoutes() {
 	searchH := handler.NewSearchHandler(s.search)
 	sseH := handler.NewSSEHandler(s.infra.Hub, s.infra.Cache)
 	billH := handler.NewBillingHandler(s.billing, s.infra.Cache)
+	prefH := handler.NewPreferencesHandler(s.db)
 
 	// ── Public routes ─────────────────────────────────────────────────────────
 	s.router.GET("/captcha/widget", captchaH.Widget)
@@ -207,6 +208,9 @@ func (s *Server) setupRoutes() {
 	api.Use(middleware.Auth(s.cfg.JWTSecret))
 	{
 		api.GET("/auth/me", authH.Me)
+
+		api.GET("/preferences", prefH.Get)
+		api.PUT("/preferences", prefH.Update)
 
 		api.GET("/workspaces", wsH.List)
 		api.POST("/workspaces", wsH.Create)
