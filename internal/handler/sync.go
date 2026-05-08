@@ -38,7 +38,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 
 	// Enforce entity count limit.
 	total := len(req.Entities.Workspaces) + len(req.Entities.Collections) +
-		len(req.Entities.Bookmarks) + len(req.Entities.Tags)
+		len(req.Entities.Bookmarks) + len(req.Entities.Tags) + len(req.Entities.Groups)
 	if total > 1000 {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "too many entities in one push (max 1000)"})
 		return
@@ -171,6 +171,38 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		}
 		if res.RowsAffected() == 0 {
 			rejected = append(rejected, model.Rejected{ID: t.ID, Reason: "stale"})
+		}
+	}
+
+	// ── Groups ────────────────────────────────────────────────────────────────────
+	for _, g := range req.Entities.Groups {
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO groups (id, user_id, name, color, is_compact, seq, deleted_at, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)
+			ON CONFLICT (id) DO UPDATE
+			  SET name=$3, color=$4, is_compact=$5, seq=$6, deleted_at=$7, updated_at=$8
+			WHERE groups.user_id = $2 AND groups.updated_at < $8`,
+			g.ID, userID, g.Name, g.Color, g.IsCompact, seq, g.DeletedAt, now)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "group upsert failed"})
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			rejected = append(rejected, model.Rejected{ID: g.ID, Reason: "stale"})
+			continue
+		}
+		// Atomically replace the tab snapshot for this group.
+		if _, err := tx.Exec(ctx, `DELETE FROM group_tabs WHERE group_id = $1`, g.ID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "group_tabs clear failed"})
+			return
+		}
+		for _, t := range g.Tabs {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO group_tabs (id, group_id, title, url, favicon, position) VALUES ($1,$2,$3,$4,$5,$6)`,
+				t.ID, g.ID, t.Title, t.URL, t.Favicon, t.Position); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "group_tab insert failed"})
+				return
+			}
 		}
 	}
 
