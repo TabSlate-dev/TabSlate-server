@@ -177,12 +177,12 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	// ── Groups ────────────────────────────────────────────────────────────────────
 	for _, g := range req.Entities.Groups {
 		tag, err := tx.Exec(ctx, `
-			INSERT INTO groups (id, user_id, name, color, is_compact, seq, deleted_at, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)
+			INSERT INTO groups (id, user_id, name, color, is_compact, seq, deleted_at, created_at, updated_at, workspace_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9)
 			ON CONFLICT (id) DO UPDATE
-			  SET name=$3, color=$4, is_compact=$5, seq=$6, deleted_at=$7, updated_at=$8
+			  SET name=$3, color=$4, is_compact=$5, seq=$6, deleted_at=$7, updated_at=$8, workspace_id=$9
 			WHERE groups.user_id = $2 AND groups.updated_at < $8`,
-			g.ID, userID, g.Name, g.Color, g.IsCompact, seq, g.DeletedAt, now)
+			g.ID, userID, g.Name, g.Color, g.IsCompact, seq, g.DeletedAt, now, g.WorkspaceID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "group upsert failed"})
 			return
