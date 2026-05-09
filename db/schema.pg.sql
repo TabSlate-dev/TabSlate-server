@@ -250,7 +250,9 @@ DO $$ BEGIN
       AND column_name = 'is_trashed'
       AND data_type = 'boolean'
   ) THEN
+    ALTER TABLE bookmarks ALTER COLUMN is_trashed DROP DEFAULT;
     ALTER TABLE bookmarks ALTER COLUMN is_trashed TYPE INT USING (is_trashed::int);
+    ALTER TABLE bookmarks ALTER COLUMN is_trashed SET DEFAULT 0;
   END IF;
 END $$;
 
