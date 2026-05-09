@@ -8,6 +8,9 @@ import (
 	"github.com/tabslate/server/db"
 )
 
+// tombstoneWindowDays is the maximum expected delta-sync lag across devices.
+// It is intentionally fixed (not operator-configurable) — changing it is a protocol decision,
+// not an operational one. Operators should adjust TRASH_GRACE_DAYS instead.
 const tombstoneWindowDays = 7
 
 // CleanupHandler runs a background goroutine that:
@@ -25,6 +28,7 @@ func NewCleanupHandler(d *db.DB, trashGraceDays int) *CleanupHandler {
 
 // Run starts the cleanup loop. Call as a goroutine; exits when ctx is cancelled.
 func (h *CleanupHandler) Run(ctx context.Context) {
+	h.runOnce(ctx) // run immediately on start
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 	for {
@@ -69,7 +73,7 @@ func (h *CleanupHandler) phase1(ctx context.Context, nowMs, graceMs int64) {
 		var uid string
 		if err := rows.Scan(&uid); err != nil {
 			log.Printf("cleanup phase1 users scan: %v", err)
-			return
+			continue
 		}
 		userIDs = append(userIDs, uid)
 	}
@@ -133,10 +137,12 @@ func (h *CleanupHandler) phase2(ctx context.Context, nowMs, graceMs, tombstoneMs
 	if _, err := h.db.Exec(ctx,
 		`DELETE FROM bookmarks WHERE is_trashed = 2 AND deleted_at < $1`, cutoff); err != nil {
 		log.Printf("cleanup phase2 bookmarks: %v", err)
+		return
 	}
 	if _, err := h.db.Exec(ctx,
 		`DELETE FROM collections WHERE is_deleted = 2 AND deleted_at < $1`, cutoff); err != nil {
 		log.Printf("cleanup phase2 collections: %v", err)
+		return
 	}
 	if _, err := h.db.Exec(ctx,
 		`DELETE FROM groups WHERE is_deleted = 2 AND deleted_at < $1`, cutoff); err != nil {
