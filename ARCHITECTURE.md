@@ -32,7 +32,7 @@ TabSlate-server/
 │
 ├── db/
 │   ├── db.go                # DB 包装器（*pgxpool.Pool）；QueryRow/Exec/Query/BeginTx 等
-│   └── schema.pg.sql        # 全量 schema（IF NOT EXISTS + ALTER TABLE 幂等迁移）
+│   └── schema.pg.sql        # 全量 schema（所有列合并到 CREATE TABLE，无迁移补丁）
 │
 └── internal/
     ├── auth/                # JWT 签发/验证（HS256）、bcrypt、refresh token 生成
@@ -68,6 +68,7 @@ TabSlate-server/
         ├── tags.go          # CRUD /tags
         ├── sync.go          # POST /sync/push、GET /sync/pull；Push 提交后批量触发 MeiliSearch 更新
         ├── sync_seq.go      # incrementSeq / currentSeq（per-user 单调序列）
+        ├── cleanup.go       # CleanupHandler：后台 goroutine，每 24h 两阶段清理（见下文）
         ├── search.go        # GET /search?q=（书签全文搜索；最少 2 个 Unicode 字符；需 Bearer JWT）
         ├── sse.go           # GET /sync/stream（SSE 流；通过 pubsub.Hub 接收广播）
         ├── billing.go       # GET+POST /api/subscription、/api/limits（limits 60s 缓存）
@@ -112,7 +113,8 @@ TabSlate-server/
 ### 核心设计
 
 - **序列号**：每个用户在 `user_sync_seq` 表有单调递增计数器，每次 push 事务内 `incrementSeq` +1
-- **软删除**：所有实体表（workspaces/collections/bookmarks/tags）有 `deleted_at BIGINT` 列，删除操作写 `deleted_at = now` 而非 `DELETE`
+- **软删除**：所有实体表有 `deleted_at BIGINT` 列，删除操作写 `deleted_at = now` 而非 `DELETE`
+- **永久删除三态**：bookmarks 的 `is_trashed INT`、collections/groups 的 `is_deleted INT`：`0`=active，`1`=soft-deleted（回收站），`2`=permanently deleted（墓碑）。客户端 `permanentlyDelete*` 推送 state=2；Pull 响应原样返回 state=2 记录供其他设备同步删除
 - **冲突解决（LWW）**：`ON CONFLICT (id) DO UPDATE ... WHERE updated_at < EXCLUDED.updated_at`，时间戳较大者胜出
 
 ### Push 流程
@@ -175,6 +177,27 @@ GET /sync/stream?token=<token>  →  SSEHandler.Stream
 - `Unsubscribe`：关闭 channel，清理 map；Redis 模式下最后一个连接离开时取消订阅
 - `infra.New()` 根据 `REDIS_URL` 自动选择实现并返回 cleanup 函数
 
+### 垃圾桶自动清理 Goroutine（cleanup.go）
+
+`CleanupHandler` 随 `app.New()` 以 goroutine 启动，绑定 server context：
+
+```
+每 24h（启动时立即执行第一次）：
+
+Phase 1 — 自动过期（state 1 → 2）：
+  UNION 查询找出所有 deleted_at < (now - TRASH_GRACE_DAYS) 的 state=1 记录的用户
+  per-user 事务：incrementSeq + UPDATE is_trashed/is_deleted = 2
+  → 产生新 seq，确保其他设备的下次 delta-pull 能收到 state=2 墓碑
+
+Phase 2 — 硬删除（state 2，已过墓碑窗口）：
+  DELETE WHERE is_trashed/is_deleted = 2 AND deleted_at < (now - TRASH_GRACE_DAYS - 7 days)
+  顺序：bookmarks → collections → groups（遵守 FK 依赖）
+  每步失败则中止后续步骤（防止 FK 孤儿）
+```
+
+- `TRASH_GRACE_DAYS` 环境变量（默认 7）控制 Phase 1 触发时机
+- 7 天墓碑窗口为固定常量，不可通过环境变量调整（协议决策，非运维决策）
+
 ### 序列号辅助函数（sync_seq.go）
 
 ```go
@@ -194,10 +217,10 @@ currentSeq(ctx, d *db.DB, userID) (int64, error)
 | `users` | id, email, password_hash, is_verified | 用户基础信息 |
 | `user_sync_seq` | user_id PK, seq BIGINT | 每用户同步序列计数器 |
 | `workspaces` | id, user_id, seq, deleted_at | 含同步字段 |
-| `collections` | id, user_id, workspace_id, seq, deleted_at, archived_at | 含同步字段；`archived_at` 非空 = 已归档（不计入配额，不显示在侧边栏） |
-| `bookmarks` | id, user_id, collection_id, seq, deleted_at, tag_ids text[] | 含同步字段；`tag_ids` 存书签关联的 Tag ID 数组 |
+| `collections` | id, user_id, workspace_id, seq, deleted_at, archived_at, **is_deleted INT** | `archived_at` 非空 = 已归档；`is_deleted`: 0/1/2 三态 |
+| `bookmarks` | id, user_id, collection_id, seq, deleted_at, tag_ids text[], **is_trashed INT** | `is_trashed`: 0/1/2 三态；`tag_ids` 存书签关联的 Tag ID 数组 |
 | `tags` | id, user_id, seq, deleted_at, updated_at | 含同步字段（updated_at 用于 LWW） |
-| `groups` | id, user_id, seq, deleted_at, created_at, updated_at | 保存的标签组；含同步字段；软删除保留行 |
+| `groups` | id, user_id, workspace_id, seq, deleted_at, **is_deleted INT** | `is_deleted`: 0/1/2 三态；软删除保留行 |
 | `group_tabs` | id, group_id FK→groups, title, url, favicon, position | 组内 tab；ON DELETE CASCADE；无 seq，整体快照替换 |
 | `refresh_tokens` | token_hash, user_id, expires_at | SHA-256 哈希存储，使用后轮换 |
 
