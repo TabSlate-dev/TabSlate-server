@@ -239,3 +239,30 @@ DO $$ BEGIN
   ALTER TABLE groups ADD COLUMN workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE;
 EXCEPTION WHEN duplicate_column THEN NULL;
 END $$;
+
+-- ── Permanent deletion: integer status fields ─────────────────────────────
+-- bookmarks.is_trashed: 0=active 1=trashed 2=permanently deleted
+-- Cast BOOLEAN to INT (idempotent: ALTER TYPE is a no-op if already INT).
+DO $$ BEGIN
+  ALTER TABLE bookmarks ALTER COLUMN is_trashed TYPE INT USING (is_trashed::int);
+EXCEPTION WHEN others THEN NULL;
+END $$;
+
+-- Migrate old "permanently deleted" bookmark records:
+-- (deleted_at set, is_trashed=0) → is_trashed=2
+UPDATE bookmarks SET is_trashed = 2
+WHERE deleted_at IS NOT NULL AND is_trashed = 0;
+
+-- collections.is_deleted: 0=active 1=trashed 2=permanently deleted
+ALTER TABLE collections ADD COLUMN IF NOT EXISTS is_deleted INT NOT NULL DEFAULT 0;
+
+-- Migrate existing soft-deleted collections to is_deleted=1
+UPDATE collections SET is_deleted = 1
+WHERE deleted_at IS NOT NULL AND is_deleted = 0;
+
+-- groups.is_deleted: 0=active 1=trashed 2=permanently deleted
+ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_deleted INT NOT NULL DEFAULT 0;
+
+-- Migrate existing soft-deleted groups to is_deleted=1
+UPDATE groups SET is_deleted = 1
+WHERE deleted_at IS NOT NULL AND is_deleted = 0;
