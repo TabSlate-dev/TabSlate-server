@@ -134,7 +134,7 @@ func (h *BookmarkHandler) Create(c *gin.Context) {
 		ID: id, UserID: userID, CollectionID: req.CollectionID,
 		Title: req.Title, URL: req.URL, FaviconURL: req.FaviconURL,
 		Description: req.Description, IsFavorite: req.IsFavorite,
-		IsArchived: req.IsArchived, IsTrashed: req.IsTrashed,
+		IsArchived: req.IsArchived, IsTrashed: boolToInt(req.IsTrashed),
 		Position: req.Position, Seq: seq, CreatedAt: now, UpdatedAt: now,
 	})
 }
@@ -252,4 +252,11 @@ func derefStr(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

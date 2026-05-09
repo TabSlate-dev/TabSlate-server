@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -103,6 +104,17 @@ type Config struct {
 	// RedisURL is the optional Redis connection URL (e.g. "redis://localhost:6379").
 	// Leave empty to use in-memory implementations for all infra providers.
 	RedisURL string
+
+	// TrustedProxies is the list of trusted reverse-proxy IPs or CIDRs used by
+	// Gin's ClientIP resolution. Defaults to RFC1918 private ranges, which covers
+	// Docker + Traefik deployments. Set TRUSTED_PROXIES= (empty) to trust only
+	// RemoteAddr (use when directly internet-exposed with no proxy).
+	TrustedProxies []string
+
+	// TrashGraceDays is the number of days before a soft-deleted item is
+	// automatically promoted to permanently deleted (state=2). The cleanup
+	// goroutine uses this value. Defaults to 7.
+	TrashGraceDays int
 }
 
 // LoadConfig reads configuration from environment variables and fatals on any
@@ -152,6 +164,14 @@ func LoadConfig() *Config {
 		RateLimitSearchWindow:   envDuration("RATE_LIMIT_SEARCH_WINDOW", 1*time.Minute),
 
 		RedisURL: os.Getenv("REDIS_URL"),
+
+		TrustedProxies: envStringSlice("TRUSTED_PROXIES", []string{
+			"172.16.0.0/12",
+			"10.0.0.0/8",
+			"192.168.0.0/16",
+		}),
+
+		TrashGraceDays: envInt("TRASH_GRACE_DAYS", 7),
 	}
 }
 
@@ -188,4 +208,25 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		log.Printf("invalid duration for %s, using default %s", key, fallback)
 	}
 	return fallback
+}
+
+// envStringSlice reads a comma-separated list of strings from the environment.
+// If the variable is not set, defaultVal is returned.
+// If the variable is set to an empty string, nil is returned (trust only RemoteAddr).
+func envStringSlice(key string, defaultVal []string) []string {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return defaultVal
+	}
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }

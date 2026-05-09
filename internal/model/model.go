@@ -59,6 +59,7 @@ type Collection struct {
 	Seq         int64   `json:"seq"`
 	DeletedAt   *int64  `json:"deleted_at,omitempty"`
 	ArchivedAt  *int64  `json:"archived_at,omitempty"`
+	IsDeleted   int     `json:"is_deleted"`     // 0=active 1=trashed 2=permanently deleted
 }
 
 // Bookmark is a saved URL.
@@ -72,7 +73,7 @@ type Bookmark struct {
 	Description  string  `json:"description,omitempty"`
 	IsFavorite   bool     `json:"is_favorite"`
 	IsArchived   bool     `json:"is_archived"`
-	IsTrashed    bool     `json:"is_trashed"`
+	IsTrashed    int      `json:"is_trashed"`    // 0=active 1=trashed 2=permanently deleted
 	TagIDs       []string `json:"tag_ids"`
 	Position     int      `json:"position"`
 	CreatedAt    int64    `json:"created_at"`
@@ -100,6 +101,7 @@ type Group struct {
 	IsCompact   bool       `json:"is_compact"`
 	Seq         int64      `json:"seq"`
 	DeletedAt   *int64     `json:"deleted_at,omitempty"`
+	IsDeleted   int        `json:"is_deleted"`    // 0=active 1=trashed 2=permanently deleted
 	CreatedAt   int64      `json:"created_at"`
 	UpdatedAt   int64      `json:"updated_at"`
 	WorkspaceID *string    `json:"workspace_id"`

@@ -81,6 +81,11 @@ func New(cfg *Config, database *db.DB, bp billing.Provider, ctx context.Context)
 		log.Fatalf("infra: %v", err)
 	}
 
+	r := gin.Default()
+	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		log.Fatalf("router: SetTrustedProxies: %v", err)
+	}
+
 	s := &Server{
 		cfg:          cfg,
 		db:           database,
@@ -88,13 +93,15 @@ func New(cfg *Config, database *db.DB, bp billing.Provider, ctx context.Context)
 		captcha:      cv,
 		mailer:       m,
 		search:       sc,
-		router:       gin.Default(),
+		router:       r,
 		ctx:          ctx,
 		infra:        infraProviders,
 		infraCleanup: infraCleanup,
 	}
 	s.setupCORS()
 	s.setupRoutes()
+	cleanupH := handler.NewCleanupHandler(database, cfg.TrashGraceDays)
+	go cleanupH.Run(ctx)
 	return s
 }
 
