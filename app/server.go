@@ -95,6 +95,8 @@ func New(cfg *Config, database *db.DB, bp billing.Provider, ctx context.Context)
 	}
 	s.setupCORS()
 	s.setupRoutes()
+	cleanupH := handler.NewCleanupHandler(database, cfg.TrashGraceDays)
+	go cleanupH.Run(ctx)
 	return s
 }
 

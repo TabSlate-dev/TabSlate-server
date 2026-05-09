@@ -103,6 +103,11 @@ type Config struct {
 	// RedisURL is the optional Redis connection URL (e.g. "redis://localhost:6379").
 	// Leave empty to use in-memory implementations for all infra providers.
 	RedisURL string
+
+	// TrashGraceDays is the number of days before a soft-deleted item is
+	// automatically promoted to permanently deleted (state=2). The cleanup
+	// goroutine uses this value. Defaults to 7.
+	TrashGraceDays int
 }
 
 // LoadConfig reads configuration from environment variables and fatals on any
@@ -152,6 +157,8 @@ func LoadConfig() *Config {
 		RateLimitSearchWindow:   envDuration("RATE_LIMIT_SEARCH_WINDOW", 1*time.Minute),
 
 		RedisURL: os.Getenv("REDIS_URL"),
+
+		TrashGraceDays: envInt("TRASH_GRACE_DAYS", 7),
 	}
 }
 
