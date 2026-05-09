@@ -348,7 +348,7 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 
 	// Groups
 	grpRows, err := h.db.Query(ctx,
-		`SELECT id, user_id, name, color, is_compact, seq, deleted_at, created_at, updated_at
+		`SELECT id, user_id, name, color, is_compact, seq, deleted_at, created_at, updated_at, workspace_id
          FROM groups WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
 		userID, afterSeq)
 	if err != nil {
@@ -361,7 +361,7 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 	for grpRows.Next() {
 		var g model.Group
 		if err := grpRows.Scan(&g.ID, &g.UserID, &g.Name, &g.Color, &g.IsCompact,
-			&g.Seq, &g.DeletedAt, &g.CreatedAt, &g.UpdatedAt); err != nil {
+			&g.Seq, &g.DeletedAt, &g.CreatedAt, &g.UpdatedAt, &g.WorkspaceID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "group scan failed"})
 			return
 		}
