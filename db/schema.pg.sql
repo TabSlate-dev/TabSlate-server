@@ -233,3 +233,9 @@ CREATE TABLE IF NOT EXISTS group_tabs (
     position INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_group_tabs_group ON group_tabs (group_id);
+
+-- Add workspace_id to groups (idempotent)
+DO $$ BEGIN
+  ALTER TABLE groups ADD COLUMN workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
