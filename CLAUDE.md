@@ -247,14 +247,14 @@ h.db.QueryRowContext(ctx, h.db.Rebind(`SELECT * FROM users WHERE email = ?`), em
 
 ## 注意事项
 
-- **schema 位置**：schema 文件在 `db/schema.pg.sql`（PostgreSQL，`//go:embed` 引用），根目录的 `schema.sql` 仅作存档，不被代码引用。schema 末尾包含 `DO $$ ... ALTER TABLE ... EXCEPTION WHEN duplicate_column` 块，确保对已有数据库的兼容迁移。原有限流表（`login_failures`、`otp_ip_requests`、`register_ip_requests`、`sse_tokens`）已通过 `DROP TABLE IF EXISTS` 迁移移除，对应状态现由 `internal/ratelimit` 和 `internal/store` 管理（in-memory 或 Redis，由 `REDIS_URL` 决定）。
+- **schema 位置**：schema 文件在 `db/schema.pg.sql`（PostgreSQL，`//go:embed` 引用），根目录的 `schema.sql` 仅作存档，不被代码引用。schema 末尾包含 `DO $$ ... ALTER TABLE ... EXCEPTION WHEN duplicate_column` 块，确保对已有数据库的兼容迁移。原有限流表（`login_failures`、`otp_ip_requests`、`register_ip_requests`、`sse_tokens`）已通过 `DROP TABLE IF EXISTS` 迁移移除，对应状态现由 `internal/ratelimit` 和 `internal/store` 管理（in-memory 或 Redis，由 `REDIS_URL` 决定）。`groups` / `group_tabs` 两张表随同步功能追加：`groups` 含 `seq`/`deleted_at` 同步字段；`group_tabs` 以 `group_id REFERENCES groups(id) ON DELETE CASCADE` 外键关联，tab 列表无 seq，整体快照替换。
 - **boolean 差异**：SQLite schema 用 `INTEGER DEFAULT 0`，PG schema 用 `BOOLEAN DEFAULT FALSE`；Go 端 `model.Bookmark` 使用 `bool`，pgx 驱动自动处理类型映射
 - **Cloud 扩展点**：在 `billing.Provider` 接口之外，Cloud 还可以实现 `billing.WebhookHandler` 接口，通过 `server.RegisterWebhook` 注册路由
 - **Captcha Widget**：`GET /captcha/widget` 提供一个 HTML 页面（由 `internal/handler/captcha.go` 提供），Chrome MV3 扩展将其嵌入 `<iframe>`，页面从配置的 `PROSOPO_BUNDLE_URL` 加载 Prosopo JS bundle，验证完成后通过 `postMessage` 将 token 传回父页面。CSP 由服务端动态构建，`script-src`/`connect-src` 均基于 `bundleOrigin`，支持官方 CDN 和自部署两种场景。
 - **OTP 安全存储**：`verification_token`（邮箱验证）和 `reset_otp_hash`（密码重置）均存 SHA-256(code)，明文 OTP 仅在发送邮件时使用一次后丢弃。`verification_attempts` / `reset_attempts` 计数器在 5 次错误后自动清空 OTP 字段，重发新 OTP 时计数器清零。
-- **同步事务要求**：`SyncHandler.Push` 必须在单个 pgx 事务中完成配额检查 + 所有 upsert + `incrementSeq`，禁止将配额检查移到事务外（TOCTOU 竞争会导致超配额）。配额 SQL 条件为 `deleted_at IS NULL AND archived_at IS NULL`——归档集合不计入配额。
+- **同步事务要求**：`SyncHandler.Push` 必须在单个 pgx 事务中完成配额检查 + 所有 upsert + `incrementSeq`，禁止将配额检查移到事务外（TOCTOU 竞争会导致超配额）。配额 SQL 条件为 `deleted_at IS NULL AND archived_at IS NULL`——归档集合不计入配额。groups 的 Push 包含两步：LWW upsert `groups` 行（`WHERE groups.updated_at < excluded.updated_at`）+ 原子替换 `group_tabs`（`DELETE FROM group_tabs WHERE group_id = $id` 后 bulk INSERT），两步均在同一事务内执行；stale group 被拒绝时跳过其 tab 替换。
 - **SSE token 单次消耗**：`POST /auth/sse-token` 将 `uuid → userID` 写入 Cache（key = `tabslate:sse_token:<token>`，TTL = 30s）；`SSEHandler.Stream` 调用 `cache.Get` 取得 userID，随即 `cache.Del` 消耗 token（不存在 → 401）。
 - **SSE Hub**：`internal/pubsub.Hub` 接口，OSS 单机使用 `InMemoryHub`，Cloud 多实例使用 `RedisHub`（Redis pub/sub，channel = `tabslate:sync:<userID>`）。`infra.New(REDIS_URL)` 自动选择实现并注入所有需要广播的 handler。
-- **软删除传播**：所有同步实体的删除操作写 `deleted_at = unix_ms`，Pull 响应含墓碑（`deleted_at != NULL`），客户端负责从本地移除对应记录；直接 `DELETE` 不会传播到其他设备。
+- **软删除传播**：所有同步实体（workspaces/collections/bookmarks/tags/groups）的删除操作写 `deleted_at = unix_ms`，Pull 响应含墓碑（`deleted_at != NULL`），客户端负责从本地移除对应记录；直接 `DELETE` 不会传播到其他设备。groups 软删除时 `group_tabs` 通过 `ON DELETE CASCADE` 自动清理；Pull 仍返回墓碑 group 行（`tabs: []`）供客户端清理本地。
 - **Tag 模型缺少 UpdatedAt**：`model.Tag` 结构体无 `UpdatedAt` 字段，Pull handler 的 tag SELECT 因此只取 6 列（无 `updated_at`）；LWW 通过 `seq` 而非 `updated_at` 实现。
 - **Bookmark tag_ids**：`bookmarks` 表有 `tag_ids text[] NOT NULL DEFAULT '{}'` 列，存储该书签关联的 Tag ID 数组。`model.Bookmark.TagIDs []string` 对应此列；Push upsert 和 Pull SELECT 均包含 `tag_ids`；pgx 原生支持 `[]string ↔ text[]` 扫描，无需额外包。

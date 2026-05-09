@@ -38,7 +38,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 
 	// Enforce entity count limit.
 	total := len(req.Entities.Workspaces) + len(req.Entities.Collections) +
-		len(req.Entities.Bookmarks) + len(req.Entities.Tags)
+		len(req.Entities.Bookmarks) + len(req.Entities.Tags) + len(req.Entities.Groups)
 	if total > 1000 {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "too many entities in one push (max 1000)"})
 		return
@@ -171,6 +171,38 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		}
 		if res.RowsAffected() == 0 {
 			rejected = append(rejected, model.Rejected{ID: t.ID, Reason: "stale"})
+		}
+	}
+
+	// ── Groups ────────────────────────────────────────────────────────────────────
+	for _, g := range req.Entities.Groups {
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO groups (id, user_id, name, color, is_compact, seq, deleted_at, created_at, updated_at, workspace_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9)
+			ON CONFLICT (id) DO UPDATE
+			  SET name=$3, color=$4, is_compact=$5, seq=$6, deleted_at=$7, updated_at=$8, workspace_id=$9
+			WHERE groups.user_id = $2 AND groups.updated_at < $8`,
+			g.ID, userID, g.Name, g.Color, g.IsCompact, seq, g.DeletedAt, now, g.WorkspaceID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "group upsert failed"})
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			rejected = append(rejected, model.Rejected{ID: g.ID, Reason: "stale"})
+			continue
+		}
+		// Atomically replace the tab snapshot for this group.
+		if _, err := tx.Exec(ctx, `DELETE FROM group_tabs WHERE group_id = $1`, g.ID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "group_tabs clear failed"})
+			return
+		}
+		for _, t := range g.Tabs {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO group_tabs (id, group_id, title, url, favicon, position) VALUES ($1,$2,$3,$4,$5,$6)`,
+				t.ID, g.ID, t.Title, t.URL, t.Favicon, t.Position); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "group_tab insert failed"})
+				return
+			}
 		}
 	}
 
@@ -312,6 +344,69 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 	if err := tagRows.Err(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "tags iteration failed"})
 		return
+	}
+
+	// Groups
+	grpRows, err := h.db.Query(ctx,
+		`SELECT id, user_id, name, color, is_compact, seq, deleted_at, created_at, updated_at, workspace_id
+         FROM groups WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
+		userID, afterSeq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "groups query failed"})
+		return
+	}
+	defer grpRows.Close()
+
+	groupIdx := map[string]int{} // id → index in resp.Entities.Groups
+	for grpRows.Next() {
+		var g model.Group
+		if err := grpRows.Scan(&g.ID, &g.UserID, &g.Name, &g.Color, &g.IsCompact,
+			&g.Seq, &g.DeletedAt, &g.CreatedAt, &g.UpdatedAt, &g.WorkspaceID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "group scan failed"})
+			return
+		}
+		g.Tabs = []model.GroupTab{}
+		groupIdx[g.ID] = len(resp.Entities.Groups)
+		resp.Entities.Groups = append(resp.Entities.Groups, g)
+	}
+	if err := grpRows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "groups iteration failed"})
+		return
+	}
+
+	// Fetch tabs for all returned groups in one batch query.
+	if len(resp.Entities.Groups) > 0 {
+		ids := make([]string, len(resp.Entities.Groups))
+		for i, g := range resp.Entities.Groups {
+			ids[i] = g.ID
+		}
+		tabRows, err := h.db.Query(ctx,
+			`SELECT id, group_id, title, url, favicon, position
+             FROM group_tabs WHERE group_id = ANY($1)`,
+			ids)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "group_tabs query failed"})
+			return
+		}
+		defer tabRows.Close()
+		for tabRows.Next() {
+			var t model.GroupTab
+			if err := tabRows.Scan(&t.ID, &t.GroupID, &t.Title, &t.URL, &t.Favicon, &t.Position); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "group_tab scan failed"})
+				return
+			}
+			if idx, ok := groupIdx[t.GroupID]; ok {
+				resp.Entities.Groups[idx].Tabs = append(resp.Entities.Groups[idx].Tabs, t)
+			}
+		}
+		if err := tabRows.Err(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "group_tabs iteration failed"})
+			return
+		}
+	}
+
+	if resp.Entities.Groups == nil {
+		resp.Entities.Groups = []model.Group{}
 	}
 
 	// Ensure slices are not nil in JSON output ([] not null)

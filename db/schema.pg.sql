@@ -207,3 +207,35 @@ DROP TABLE IF EXISTS sse_tokens;
 DROP TABLE IF EXISTS login_failures;
 DROP TABLE IF EXISTS otp_ip_requests;
 DROP TABLE IF EXISTS register_ip_requests;
+
+-- ── Saved tab groups ─────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS groups (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    color      TEXT NOT NULL,
+    is_compact BOOLEAN NOT NULL DEFAULT FALSE,
+    seq        BIGINT NOT NULL DEFAULT 0,
+    deleted_at BIGINT,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_groups_user_seq ON groups (user_id, seq);
+
+-- Tabs within a saved group (snapshot — no individual seq)
+CREATE TABLE IF NOT EXISTS group_tabs (
+    id       TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    title    TEXT NOT NULL,
+    url      TEXT NOT NULL,
+    favicon  TEXT NOT NULL,
+    position INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_group_tabs_group ON group_tabs (group_id);
+
+-- Add workspace_id to groups (idempotent)
+DO $$ BEGIN
+  ALTER TABLE groups ADD COLUMN workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;

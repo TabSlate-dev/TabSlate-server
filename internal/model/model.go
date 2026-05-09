@@ -91,6 +91,31 @@ type Tag struct {
 	DeletedAt *int64 `json:"deleted_at,omitempty"`
 }
 
+// Group is a saved tab group. Tabs sync as a snapshot — no individual tab seq.
+type Group struct {
+	ID          string     `json:"id"`
+	UserID      string     `json:"user_id"`
+	Name        string     `json:"name"`
+	Color       string     `json:"color"`
+	IsCompact   bool       `json:"is_compact"`
+	Seq         int64      `json:"seq"`
+	DeletedAt   *int64     `json:"deleted_at,omitempty"`
+	CreatedAt   int64      `json:"created_at"`
+	UpdatedAt   int64      `json:"updated_at"`
+	WorkspaceID *string    `json:"workspace_id"`
+	Tabs        []GroupTab `json:"tabs"`
+}
+
+// GroupTab is a tab inside a saved group.
+type GroupTab struct {
+	ID       string `json:"id"`
+	GroupID  string `json:"group_id"`
+	Title    string `json:"title"`
+	URL      string `json:"url"`
+	Favicon  string `json:"favicon"`
+	Position int    `json:"position"`
+}
+
 // ─── Request / Response DTOs ──────────────────────────────────────────────────
 
 type RegisterRequest struct {
@@ -176,6 +201,7 @@ type SyncEntities struct {
 	Collections []Collection `json:"collections"`
 	Bookmarks   []Bookmark   `json:"bookmarks"`
 	Tags        []Tag        `json:"tags"`
+	Groups      []Group      `json:"groups"`
 }
 
 type SyncPushRequest struct {

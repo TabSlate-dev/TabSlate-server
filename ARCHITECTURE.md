@@ -123,6 +123,8 @@ POST /sync/push  →  SyncHandler.Push
   2. 开启事务
   3. 并行检查配额（`deleted_at IS NULL AND archived_at IS NULL` 的 collections 上限）
   4. LWW upsert workspaces / collections / bookmarks / tags（各自独立 ON CONFLICT）
+     + LWW upsert groups（同样 ON CONFLICT + WHERE updated_at 守卫）
+     + 原子替换 group_tabs：DELETE WHERE group_id = $id，然后 bulk INSERT（stale group 被拒绝则跳过）
   5. incrementSeq → 新 seq
   6. 提交事务
   7. h.hub.Broadcast(userID, seq)       // 通知所有 SSE 连接（in-memory 或 Redis pub/sub）
@@ -135,11 +137,12 @@ POST /sync/push  →  SyncHandler.Push
 ```
 GET /sync/pull?after_seq=N  →  SyncHandler.Pull
   1. after_seq < 0 → 400
-  2. 四张表各自 SELECT WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC
+  2. 五张表各自 SELECT WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC
+     groups 用 LEFT JOIN group_tabs 聚合 tabs（ANY($1) 批量取 tab，groupIdx map 分发）
   3. rows.Err() 检查
   4. currentSeq → server_seq
-  5. 返回 { server_seq, entities: { workspaces, collections, bookmarks, tags } }
-     （含软删除记录，deleted_at != NULL 表示墓碑）
+  5. 返回 { server_seq, entities: { workspaces, collections, bookmarks, tags, groups } }
+     （含软删除记录，deleted_at != NULL 表示墓碑；软删除 group 的 tabs 字段为 []）
 ```
 
 ### SSE 流程
@@ -194,6 +197,8 @@ currentSeq(ctx, d *db.DB, userID) (int64, error)
 | `collections` | id, user_id, workspace_id, seq, deleted_at, archived_at | 含同步字段；`archived_at` 非空 = 已归档（不计入配额，不显示在侧边栏） |
 | `bookmarks` | id, user_id, collection_id, seq, deleted_at, tag_ids text[] | 含同步字段；`tag_ids` 存书签关联的 Tag ID 数组 |
 | `tags` | id, user_id, seq, deleted_at, updated_at | 含同步字段（updated_at 用于 LWW） |
+| `groups` | id, user_id, seq, deleted_at, created_at, updated_at | 保存的标签组；含同步字段；软删除保留行 |
+| `group_tabs` | id, group_id FK→groups, title, url, favicon, position | 组内 tab；ON DELETE CASCADE；无 seq，整体快照替换 |
 | `refresh_tokens` | token_hash, user_id, expires_at | SHA-256 哈希存储，使用后轮换 |
 
 **Delta-pull 索引**（`schema.pg.sql` 末尾）：
@@ -202,6 +207,8 @@ CREATE INDEX idx_workspaces_user_seq  ON workspaces  (user_id, seq);
 CREATE INDEX idx_collections_user_seq ON collections (user_id, seq);
 CREATE INDEX idx_bookmarks_user_seq   ON bookmarks   (user_id, seq);
 CREATE INDEX idx_tags_user_seq        ON tags        (user_id, seq);
+CREATE INDEX idx_groups_user_seq      ON groups      (user_id, seq);
+CREATE INDEX idx_group_tabs_group     ON group_tabs  (group_id);
 ```
 
 ## MeiliSearch 搜索索引
