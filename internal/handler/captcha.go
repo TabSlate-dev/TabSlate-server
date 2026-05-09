@@ -25,7 +25,7 @@ const captchaWidgetHTMLTmpl = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<style>*{margin:0;padding:0;box-sizing:border-box}body{background:transparent}</style>
+<style>*{margin:0;padding:0;box-sizing:border-box}html,body{background:transparent}</style>
 </head>
 <body>
 <form><div id="c"></div></form>
