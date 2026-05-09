@@ -86,7 +86,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			if limits.MaxCollections != -1 {
 				var count int
 				if err := tx.QueryRow(ctx,
-					`SELECT COUNT(*) FROM collections WHERE user_id = $1 AND deleted_at IS NULL AND archived_at IS NULL`,
+					`SELECT COUNT(*) FROM collections WHERE user_id = $1 AND is_deleted = 0`,
 					userID,
 				).Scan(&count); err != nil {
 					c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
@@ -99,12 +99,12 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			}
 		}
 		tag, err := tx.Exec(ctx, `
-			INSERT INTO collections (id, user_id, workspace_id, name, icon, position, seq, deleted_at, archived_at, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
+			INSERT INTO collections (id, user_id, workspace_id, name, icon, position, seq, deleted_at, archived_at, is_deleted, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
 			ON CONFLICT (id) DO UPDATE
-			  SET workspace_id=$3, name=$4, icon=$5, position=$6, seq=$7, deleted_at=$8, archived_at=$9, updated_at=$10
-			WHERE collections.user_id = $2 AND collections.updated_at < $10`,
-			col.ID, userID, col.WorkspaceID, col.Name, col.Icon, col.Position, seq, col.DeletedAt, col.ArchivedAt, now)
+			  SET workspace_id=$3, name=$4, icon=$5, position=$6, seq=$7, deleted_at=$8, archived_at=$9, is_deleted=$10, updated_at=$11
+			WHERE collections.user_id = $2 AND collections.updated_at < $11`,
+			col.ID, userID, col.WorkspaceID, col.Name, col.Icon, col.Position, seq, col.DeletedAt, col.ArchivedAt, col.IsDeleted, now)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "collection upsert failed"})
 			return
@@ -140,7 +140,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		if tag.RowsAffected() == 0 {
 			rejected = append(rejected, model.Rejected{ID: bm.ID, Reason: "stale"})
 		} else {
-			if bm.DeletedAt != nil || bm.IsTrashed {
+			if bm.DeletedAt != nil || bm.IsTrashed > 0 {
 				searchDeletes = append(searchDeletes, bm.ID)
 			} else {
 				searchUpserts = append(searchUpserts, search.BookmarkDoc{
@@ -177,12 +177,12 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	// ── Groups ────────────────────────────────────────────────────────────────────
 	for _, g := range req.Entities.Groups {
 		tag, err := tx.Exec(ctx, `
-			INSERT INTO groups (id, user_id, name, color, is_compact, seq, deleted_at, created_at, updated_at, workspace_id)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9)
+			INSERT INTO groups (id, user_id, name, color, is_compact, seq, deleted_at, is_deleted, created_at, updated_at, workspace_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10)
 			ON CONFLICT (id) DO UPDATE
-			  SET name=$3, color=$4, is_compact=$5, seq=$6, deleted_at=$7, updated_at=$8, workspace_id=$9
-			WHERE groups.user_id = $2 AND groups.updated_at < $8`,
-			g.ID, userID, g.Name, g.Color, g.IsCompact, seq, g.DeletedAt, now, g.WorkspaceID)
+			  SET name=$3, color=$4, is_compact=$5, seq=$6, deleted_at=$7, is_deleted=$8, updated_at=$9, workspace_id=$10
+			WHERE groups.user_id = $2 AND groups.updated_at < $9`,
+			g.ID, userID, g.Name, g.Color, g.IsCompact, seq, g.DeletedAt, g.IsDeleted, now, g.WorkspaceID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "group upsert failed"})
 			return
