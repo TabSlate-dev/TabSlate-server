@@ -272,7 +272,7 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 
 	// Collections
 	colRows, err := h.db.Query(ctx,
-		`SELECT id, user_id, workspace_id, name, icon, position, seq, deleted_at, archived_at, created_at, updated_at
+		`SELECT id, user_id, workspace_id, name, icon, position, seq, deleted_at, archived_at, is_deleted, created_at, updated_at
          FROM collections WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
 		userID, afterSeq)
 	if err != nil {
@@ -283,7 +283,7 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 	for colRows.Next() {
 		var col model.Collection
 		if err := colRows.Scan(&col.ID, &col.UserID, &col.WorkspaceID, &col.Name, &col.Icon, &col.Position,
-			&col.Seq, &col.DeletedAt, &col.ArchivedAt, &col.CreatedAt, &col.UpdatedAt); err != nil {
+			&col.Seq, &col.DeletedAt, &col.ArchivedAt, &col.IsDeleted, &col.CreatedAt, &col.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "collection scan failed"})
 			return
 		}
@@ -348,7 +348,7 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 
 	// Groups
 	grpRows, err := h.db.Query(ctx,
-		`SELECT id, user_id, name, color, is_compact, seq, deleted_at, created_at, updated_at, workspace_id
+		`SELECT id, user_id, name, color, is_compact, seq, deleted_at, is_deleted, created_at, updated_at, workspace_id
          FROM groups WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
 		userID, afterSeq)
 	if err != nil {
@@ -361,7 +361,7 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 	for grpRows.Next() {
 		var g model.Group
 		if err := grpRows.Scan(&g.ID, &g.UserID, &g.Name, &g.Color, &g.IsCompact,
-			&g.Seq, &g.DeletedAt, &g.CreatedAt, &g.UpdatedAt, &g.WorkspaceID); err != nil {
+			&g.Seq, &g.DeletedAt, &g.IsDeleted, &g.CreatedAt, &g.UpdatedAt, &g.WorkspaceID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "group scan failed"})
 			return
 		}
