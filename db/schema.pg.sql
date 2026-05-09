@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     description   TEXT,
     is_favorite   BOOLEAN NOT NULL DEFAULT FALSE,
     is_archived   BOOLEAN NOT NULL DEFAULT FALSE,
-    is_trashed    BOOLEAN NOT NULL DEFAULT FALSE,
+    is_trashed    INT NOT NULL DEFAULT 0,
     position      INTEGER NOT NULL DEFAULT 0,
     created_at    BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
     updated_at    BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
@@ -244,8 +244,14 @@ END $$;
 -- bookmarks.is_trashed: 0=active 1=trashed 2=permanently deleted
 -- Cast BOOLEAN to INT (idempotent: ALTER TYPE is a no-op if already INT).
 DO $$ BEGIN
-  ALTER TABLE bookmarks ALTER COLUMN is_trashed TYPE INT USING (is_trashed::int);
-EXCEPTION WHEN others THEN NULL;
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'bookmarks'
+      AND column_name = 'is_trashed'
+      AND data_type = 'boolean'
+  ) THEN
+    ALTER TABLE bookmarks ALTER COLUMN is_trashed TYPE INT USING (is_trashed::int);
+  END IF;
 END $$;
 
 -- Migrate old "permanently deleted" bookmark records:
