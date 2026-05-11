@@ -1,6 +1,9 @@
 package billing
 
-import "context"
+import (
+	"context"
+	"net/http"
+)
 
 // Provider is the billing abstraction shared by all server editions.
 //
@@ -41,7 +44,7 @@ type Provider interface {
 // WebhookHandler is implemented by providers that process inbound webhook
 // events from the billing platform (Cloud only).
 type WebhookHandler interface {
-	HandleWebhook(ctx context.Context, payload []byte, signature string) error
+	HandleWebhook(ctx context.Context, payload []byte, headers http.Header) error
 }
 
 // UserSyncer is an optional interface implemented by providers that support
