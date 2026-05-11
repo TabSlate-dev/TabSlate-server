@@ -23,6 +23,8 @@ type Limits struct {
 	MaxBookmarks   int `json:"max_bookmarks"`
 	MaxCollections int `json:"max_collections"`
 	MaxTags        int `json:"max_tags"`
+	MaxSavedGroups int `json:"max_saved_groups"`
+	TrashGraceDays int `json:"trash_grace_days"`
 }
 
 // Subscription holds the user's current subscription state.

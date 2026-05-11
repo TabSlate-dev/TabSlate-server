@@ -26,9 +26,10 @@ TabSlate-server/
 │   └── server.go            # Server 结构体：New、setupCORS、setupRoutes、Run、RegisterWebhook、SyncSubscription
 │
 ├── billing/
+│   ├── types.go             # 共享类型：Limits（MaxWorkspaces/MaxBookmarks/MaxCollections/MaxTags/MaxSavedGroups/TrashGraceDays），Subscription，Invoice
 │   ├── provider.go          # Provider 接口：OnUserCreated/GetLimits/GetSubscription/CreateCheckout/ListInvoices/CancelSubscription
 │   └── local/
-│       └── provider.go      # OSS 实现：从 License JWT 读取配额；无 License = 免费限额
+│       └── provider.go      # OSS 实现：启动时向 subscription_capacity 表写入 unlimited 行（-1），GetLimits 从表读取；DB 不可用时 fallback 到 -1 默认值
 │
 ├── db/
 │   ├── db.go                # DB 包装器（*pgxpool.Pool）；QueryRow/Exec/Query/BeginTx 等
@@ -223,6 +224,7 @@ currentSeq(ctx, d *db.DB, userID) (int64, error)
 | `groups` | id, user_id, workspace_id, seq, deleted_at, **is_deleted INT** | `is_deleted`: 0/1/2 三态；软删除保留行 |
 | `group_tabs` | id, group_id FK→groups, title, url, favicon, position | 组内 tab；ON DELETE CASCADE；无 seq，整体快照替换 |
 | `refresh_tokens` | token_hash, user_id, expires_at | SHA-256 哈希存储，使用后轮换 |
+| `subscription_capacity` | plan_code PK, plan_id, max_workspaces, max_bookmarks, max_collections, max_tags, max_saved_groups, trash_grace_days, updated_at | 套餐配额；OSS 写 `unlimited`（全 -1）；Cloud 由 Meteroid 同步写入；-1 = 不限制 |
 
 **Delta-pull 索引**（`schema.pg.sql` 末尾）：
 ```sql
@@ -259,7 +261,7 @@ CREATE INDEX idx_group_tabs_group     ON group_tabs  (group_id);
 
 ```
 cmd/server/main.go
-  → local.New(licenseKey)                    # OSS billing.Provider
+  → local.New(licenseKey, pubkey, database)  # OSS billing.Provider（写 subscription_capacity）
   → app.New(cfg, db, provider, ctx)
       ├── infra.New(cfg.RedisURL)            # Providers{Hub, Cache, Limiter}；空 = in-memory
       ├── captcha.New(cfg.ProsopoSecret, ...)
@@ -268,7 +270,7 @@ cmd/server/main.go
       └── handler.New*(db, infra, search, ...)  # 各 handler 注入 Hub/Cache/Limiter
 ```
 
-Cloud 仓库只需将 `local.New(...)` 替换为 `lago.New(...)`，设置 `REDIS_URL`，并调用 `s.RegisterWebhook("/webhooks/lago", lagoHandler)` 即可实现水平扩展。
+Cloud 仓库只需将 `local.New(...)` 替换为 `meteroid.New(...)`，调用 `bp.Start(ctx)` 启动容量同步 goroutine，并设置 `REDIS_URL` 即可实现水平扩展。
 
 ## 认证机制
 
