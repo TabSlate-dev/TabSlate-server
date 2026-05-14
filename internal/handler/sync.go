@@ -1,27 +1,30 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
+	"github.com/tabslate/server/billing"
 	"github.com/tabslate/server/db"
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/model"
-	"github.com/tabslate/server/internal/plan"
 	"github.com/tabslate/server/internal/pubsub"
 	"github.com/tabslate/server/internal/search"
 )
 
 type SyncHandler struct {
-	db     *db.DB
-	search *search.Client
-	hub    pubsub.Hub
+	db      *db.DB
+	search  *search.Client
+	hub     pubsub.Hub
+	billing billing.Provider
 }
 
-func NewSyncHandler(d *db.DB, sc *search.Client, hub pubsub.Hub) *SyncHandler {
-	return &SyncHandler{db: d, search: sc, hub: hub}
+func NewSyncHandler(d *db.DB, sc *search.Client, hub pubsub.Hub, bp billing.Provider) *SyncHandler {
+	return &SyncHandler{db: d, search: sc, hub: hub, billing: bp}
 }
 
 // POST /sync/push
@@ -41,6 +44,12 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		len(req.Entities.Bookmarks) + len(req.Entities.Tags) + len(req.Entities.Groups)
 	if total > 1000 {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "too many entities in one push (max 1000)"})
+		return
+	}
+
+	limits, err := h.billing.GetLimits(ctx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
 		return
 	}
 
@@ -81,9 +90,20 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	// ── Collections ───────────────────────────────────────────────────────────
 	for _, col := range req.Entities.Collections {
 		if col.DeletedAt == nil {
-			userPlan := plan.GetUserPlan(ctx, h.db, userID)
-			limits := plan.Get(userPlan)
 			if limits.MaxCollections != -1 {
+				var existingNonTrashed bool
+				err := tx.QueryRow(ctx,
+					`SELECT true FROM collections WHERE id = $1 AND user_id = $2 AND is_deleted = 0`,
+					col.ID, userID,
+				).Scan(&existingNonTrashed)
+				if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+					return
+				}
+				if existingNonTrashed {
+					goto upsertCollection
+				}
+
 				var count int
 				if err := tx.QueryRow(ctx,
 					`SELECT COUNT(*) FROM collections WHERE user_id = $1 AND is_deleted = 0`,
@@ -98,6 +118,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				}
 			}
 		}
+	upsertCollection:
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO collections (id, user_id, workspace_id, name, icon, position, seq, deleted_at, archived_at, is_deleted, created_at, updated_at)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
@@ -176,6 +197,35 @@ func (h *SyncHandler) Push(c *gin.Context) {
 
 	// ── Groups ────────────────────────────────────────────────────────────────────
 	for _, g := range req.Entities.Groups {
+		if g.DeletedAt == nil && limits.MaxSavedGroups != -1 {
+			var existingActive bool
+			err := tx.QueryRow(ctx,
+				`SELECT true FROM groups WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+				g.ID, userID,
+			).Scan(&existingActive)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+				return
+			}
+			if existingActive {
+				goto upsertGroup
+			}
+
+			var count int
+			if err := tx.QueryRow(ctx,
+				`SELECT COUNT(*) FROM groups WHERE user_id = $1 AND deleted_at IS NULL`,
+				userID,
+			).Scan(&count); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+				return
+			}
+			if count >= limits.MaxSavedGroups {
+				rejected = append(rejected, model.Rejected{ID: g.ID, Reason: "quota_exceeded"})
+				continue
+			}
+		}
+
+	upsertGroup:
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO groups (id, user_id, name, color, is_compact, seq, deleted_at, is_deleted, created_at, updated_at, workspace_id)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10)
@@ -382,7 +432,8 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 		}
 		tabRows, err := h.db.Query(ctx,
 			`SELECT id, group_id, title, url, favicon, position
-             FROM group_tabs WHERE group_id = ANY($1)`,
+             FROM group_tabs WHERE group_id = ANY($1)
+             ORDER BY group_id ASC, position ASC, id ASC`,
 			ids)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "group_tabs query failed"})
@@ -423,7 +474,11 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 		resp.Entities.Tags = []model.Tag{}
 	}
 
-	serverSeq, _ := currentSeq(ctx, h.db, userID)
+	serverSeq, err := currentSeq(ctx, h.db, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "sync failed"})
+		return
+	}
 	resp.ServerSeq = serverSeq
 
 	c.JSON(http.StatusOK, resp)

@@ -7,22 +7,23 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/tabslate/server/billing"
 	"github.com/tabslate/server/db"
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/model"
-	"github.com/tabslate/server/internal/plan"
 	"github.com/tabslate/server/internal/pubsub"
 	"github.com/tabslate/server/internal/search"
 )
 
 type BookmarkHandler struct {
-	db     *db.DB
-	search *search.Client
-	hub    pubsub.Hub
+	db      *db.DB
+	search  *search.Client
+	hub     pubsub.Hub
+	billing billing.Provider
 }
 
-func NewBookmarkHandler(d *db.DB, sc *search.Client, hub pubsub.Hub) *BookmarkHandler {
-	return &BookmarkHandler{db: d, search: sc, hub: hub}
+func NewBookmarkHandler(d *db.DB, sc *search.Client, hub pubsub.Hub, bp billing.Provider) *BookmarkHandler {
+	return &BookmarkHandler{db: d, search: sc, hub: hub, billing: bp}
 }
 
 // GET /bookmarks?collection_id=&favorite=&archived=&trashed=
@@ -48,9 +49,9 @@ func (h *BookmarkHandler) List(c *gin.Context) {
 		query += " AND is_archived=true"
 	}
 	if c.Query("trashed") == "true" {
-		query += " AND is_trashed=true"
+		query += " AND is_trashed > 0"
 	} else {
-		query += " AND is_trashed=false"
+		query += " AND is_trashed = 0"
 	}
 	query += " ORDER BY position ASC"
 
@@ -77,9 +78,21 @@ func (h *BookmarkHandler) Create(c *gin.Context) {
 	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 
-	if err := plan.CheckBookmark(ctx, h.db, userID); err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+	limits, err := h.billing.GetLimits(ctx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
 		return
+	}
+	if limits.MaxBookmarks != -1 {
+		var count int
+		if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM bookmarks WHERE user_id = $1 AND deleted_at IS NULL AND is_trashed = 0`, userID).Scan(&count); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			return
+		}
+		if count >= limits.MaxBookmarks {
+			c.JSON(http.StatusForbidden, gin.H{"error": "bookmark limit reached", "code": "quota_exceeded"})
+			return
+		}
 	}
 
 	var req model.BookmarkRequest
@@ -109,7 +122,7 @@ func (h *BookmarkHandler) Create(c *gin.Context) {
 		  description, is_favorite, is_archived, is_trashed, position, seq, created_at, updated_at)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
 		id, userID, req.CollectionID, req.Title, req.URL, req.FaviconURL,
-		req.Description, req.IsFavorite, req.IsArchived, req.IsTrashed, req.Position, seq, now,
+		req.Description, req.IsFavorite, req.IsArchived, boolToInt(req.IsTrashed), req.Position, seq, now,
 	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create bookmark"})
 		return
@@ -121,15 +134,17 @@ func (h *BookmarkHandler) Create(c *gin.Context) {
 	}
 
 	h.hub.Broadcast(userID, seq)
-	h.search.UpsertBookmark(search.BookmarkDoc{
-		ID:           id,
-		UserID:       userID,
-		Title:        req.Title,
-		URL:          req.URL,
-		Description:  req.Description,
-		CollectionID: derefStr(req.CollectionID),
-		IsArchived:   req.IsArchived,
-	})
+	if !req.IsTrashed {
+		h.search.UpsertBookmark(search.BookmarkDoc{
+			ID:           id,
+			UserID:       userID,
+			Title:        req.Title,
+			URL:          req.URL,
+			Description:  req.Description,
+			CollectionID: derefStr(req.CollectionID),
+			IsArchived:   req.IsArchived,
+		})
+	}
 	c.JSON(http.StatusCreated, model.Bookmark{
 		ID: id, UserID: userID, CollectionID: req.CollectionID,
 		Title: req.Title, URL: req.URL, FaviconURL: req.FaviconURL,
@@ -171,7 +186,7 @@ func (h *BookmarkHandler) Update(c *gin.Context) {
 		  is_favorite=$6, is_archived=$7, is_trashed=$8, position=$9, seq=$10, updated_at=$11
 		  WHERE id=$12 AND user_id=$13 AND deleted_at IS NULL`,
 		req.CollectionID, req.Title, req.URL, req.FaviconURL, req.Description,
-		req.IsFavorite, req.IsArchived, req.IsTrashed, req.Position, seq, now, id, userID,
+		req.IsFavorite, req.IsArchived, boolToInt(req.IsTrashed), req.Position, seq, now, id, userID,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update bookmark"})

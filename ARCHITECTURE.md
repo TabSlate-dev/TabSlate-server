@@ -45,7 +45,6 @@ TabSlate-server/
     │   ├── auth.go          # Bearer JWT 验证中间件
     │   └── ratelimit.go     # RateLimitByIP(limiter, limit, window)：接受 ratelimit.Limiter 接口
     ├── model/               # 请求/响应结构体、Plan 常量
-    ├── plan/                # 本地 DB 配额检查（过渡期）
     ├── pubsub/
     │   ├── hub.go           # Hub 接口：Subscribe / Broadcast / Unsubscribe
     │   ├── memory.go        # InMemoryHub（OSS 单机）
@@ -72,7 +71,7 @@ TabSlate-server/
         ├── cleanup.go       # CleanupHandler：后台 goroutine，每 24h 两阶段清理（见下文）
         ├── search.go        # GET /search?q=（书签全文搜索；最少 2 个 Unicode 字符；需 Bearer JWT）
         ├── sse.go           # GET /sync/stream（SSE 流；通过 pubsub.Hub 接收广播）
-        ├── billing.go       # GET+POST /api/subscription、/api/limits（limits 60s 缓存）
+        ├── billing.go       # GET /api/plan（subscription+limits+usage 汇总）、/api/subscription、/api/limits（60s 缓存）、/api/checkout、/api/invoices、DELETE /api/subscription
         └── captcha.go       # GET /captcha/widget、/captcha/widget.js
 ```
 
@@ -103,8 +102,9 @@ TabSlate-server/
 | POST | `/sync/push` | 批量推送本地变更（512KB 限制） | Bearer JWT |
 | GET | `/sync/pull` | 拉取指定 seq 之后的增量 | Bearer JWT |
 | GET | `/search` | 全文搜索书签（`?q=`，最少 2 字符，MeiliSearch） | Bearer JWT |
+| GET | `/api/plan` | 套餐 + 配额上限 + 当前使用量汇总 | Bearer JWT |
 | GET | `/api/subscription` | 当前订阅信息 | Bearer JWT |
-| GET | `/api/limits` | 当前配额限制 | Bearer JWT |
+| GET | `/api/limits` | 当前配额上限（60s 缓存） | Bearer JWT |
 | POST | `/api/checkout` | 创建结账会话（Cloud） | Bearer JWT |
 | GET | `/api/invoices` | 账单列表（Cloud） | Bearer JWT |
 | DELETE | `/api/subscription` | 取消订阅（Cloud） | Bearer JWT |
@@ -124,7 +124,7 @@ TabSlate-server/
 POST /sync/push  →  SyncHandler.Push
   1. 解析请求体（最大 512KB）
   2. 开启事务
-  3. 并行检查配额（`deleted_at IS NULL AND archived_at IS NULL` 的 collections 上限）
+  3. 调用 `billing.GetLimits()` 获取配额上限（事务外，结果复用于全部循环）；对 collections（`is_deleted = 0`）和 saved groups（`deleted_at IS NULL`）在事务内 COUNT 检查
   4. LWW upsert workspaces / collections / bookmarks / tags（各自独立 ON CONFLICT）
      + LWW upsert groups（同样 ON CONFLICT + WHERE updated_at 守卫）
      + 原子替换 group_tabs：DELETE WHERE group_id = $id，然后 bulk INSERT（stale group 被拒绝则跳过）

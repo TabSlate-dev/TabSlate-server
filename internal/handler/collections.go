@@ -6,20 +6,21 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/tabslate/server/billing"
 	"github.com/tabslate/server/db"
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/model"
-	"github.com/tabslate/server/internal/plan"
 	"github.com/tabslate/server/internal/pubsub"
 )
 
 type CollectionHandler struct {
-	db  *db.DB
-	hub pubsub.Hub
+	db      *db.DB
+	hub     pubsub.Hub
+	billing billing.Provider
 }
 
-func NewCollectionHandler(d *db.DB, hub pubsub.Hub) *CollectionHandler {
-	return &CollectionHandler{db: d, hub: hub}
+func NewCollectionHandler(d *db.DB, hub pubsub.Hub, bp billing.Provider) *CollectionHandler {
+	return &CollectionHandler{db: d, hub: hub, billing: bp}
 }
 
 // GET /collections
@@ -80,9 +81,21 @@ func (h *CollectionHandler) Create(c *gin.Context) {
 	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 
-	if err := plan.CheckCollection(ctx, h.db, userID); err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+	limits, err := h.billing.GetLimits(ctx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
 		return
+	}
+	if limits.MaxCollections != -1 {
+		var count int
+		if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM collections WHERE user_id = $1 AND is_deleted = 0`, userID).Scan(&count); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			return
+		}
+		if count >= limits.MaxCollections {
+			c.JSON(http.StatusForbidden, gin.H{"error": "collection limit reached", "code": "quota_exceeded"})
+			return
+		}
 	}
 
 	var req model.CollectionRequest
