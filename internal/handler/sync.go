@@ -113,7 +113,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 					return
 				}
 				if count >= limits.MaxCollections {
-					rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "quota_exceeded"})
+					rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "quota_exceeded", Type: "collection"})
 					continue
 				}
 			}
@@ -220,7 +220,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				return
 			}
 			if count >= limits.MaxSavedGroups {
-				rejected = append(rejected, model.Rejected{ID: g.ID, Reason: "quota_exceeded"})
+				rejected = append(rejected, model.Rejected{ID: g.ID, Reason: "quota_exceeded", Type: "saved_group"})
 				continue
 			}
 		}
