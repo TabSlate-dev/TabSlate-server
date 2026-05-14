@@ -72,6 +72,20 @@ func (c *Client) UpsertBookmark(doc BookmarkDoc) {
 	}()
 }
 
+// BulkUpsert adds or updates multiple documents synchronously in a single call.
+// Used by the reindex CLI tool for efficient batch indexing.
+func (c *Client) BulkUpsert(docs []BookmarkDoc) error {
+	if c == nil || len(docs) == 0 {
+		return nil
+	}
+	pk := "id"
+	_, err := c.index.AddDocuments(docs, &meilisearch.DocumentOptions{PrimaryKey: &pk})
+	if err != nil {
+		return fmt.Errorf("meilisearch addDocuments: %w", err)
+	}
+	return nil
+}
+
 // DeleteBookmark removes a document from the index. Fire-and-forget goroutine.
 func (c *Client) DeleteBookmark(id string) {
 	if c == nil {
