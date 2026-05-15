@@ -133,6 +133,7 @@ POST /sync/push  →  SyncHandler.Push
   7. h.hub.Broadcast(userID, seq)       // 通知所有 SSE 连接（in-memory 或 Redis pub/sub）
   8. 对成功 upsert 的书签触发 MeiliSearch upsert/delete（事务提交后，fire-and-forget）
   9. 返回 { server_seq, rejected: [] }
+     rejected 项结构：{ id, reason, type? }；reason = "quota_exceeded" 时携带 type = "collection" | "saved_group"
 ```
 
 ### Pull 流程

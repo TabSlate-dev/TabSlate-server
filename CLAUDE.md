@@ -10,7 +10,7 @@ TabSlate 由三个仓库组成：
 |---|---|---|
 | **`TabSlate`** | 公开，AGPL | Chrome 扩展前端，TypeScript + React + WXT |
 | **`TabSlate-server`**（本仓库） | 公开，AGPL | Go 后端 OSS 版，可自托管，计费基于本地 License JWT |
-| **`TabSlate-cloud`** | 私有 | Go 后端 Cloud 版，以本仓库为 Go module 依赖，注入 Lago 计费 |
+| **`TabSlate-cloud`** | 私有 | Go 后端 Cloud 版，以本仓库为 Go module 依赖，注入 Meteroid 计费 |
 
 `TabSlate-cloud` 通过 `require github.com/tabslate/server` + `replace` 指令引用本仓库，仅需替换 `billing.Provider` 实现即可获得完整后端能力。Cloud 仓库可直接导入本仓库的 `billing/`、`db/`、`app/` 公开包，`internal/` 包对外部模块不可见（Go 模块系统强制）。
 
@@ -237,8 +237,8 @@ h.db.QueryRowContext(ctx, h.db.Rebind(`SELECT * FROM users WHERE email = ?`), em
 
 ### Webhook（Cloud）
 
-- Lago webhook 必须验证 `X-Lago-Signature` 签名头，拒绝签名无效的请求
-- Webhook 处理函数应在验签通过后才读取 payload body，避免大量无效请求消耗内存
+- Cloud 版当前使用 Meteroid 计费，无 Webhook（缓存失效依赖 TTL）
+- 若未来接入支付 Webhook（Stripe 等），须验证签名头后再读取 payload body，避免大量无效请求消耗内存
 
 ### CORS
 
