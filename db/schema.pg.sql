@@ -127,6 +127,20 @@ CREATE TABLE IF NOT EXISTS group_tabs (
     position INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS subscription_capacity (
+    plan_code        TEXT         PRIMARY KEY,
+    plan_id          TEXT         NOT NULL DEFAULT '',
+    max_workspaces   INTEGER      NOT NULL DEFAULT -1,
+    max_bookmarks    INTEGER      NOT NULL DEFAULT -1,
+    max_collections  INTEGER      NOT NULL DEFAULT -1,
+    max_tags         INTEGER      NOT NULL DEFAULT -1,
+    max_saved_groups INTEGER      NOT NULL DEFAULT -1,
+    trash_grace_days INTEGER      NOT NULL DEFAULT 7,
+    updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+ALTER TABLE subscription_capacity ADD COLUMN IF NOT EXISTS max_saved_groups INTEGER NOT NULL DEFAULT -1;
+ALTER TABLE subscription_capacity ADD COLUMN IF NOT EXISTS trash_grace_days INTEGER NOT NULL DEFAULT 7;
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_workspaces_user       ON workspaces  (user_id);
 CREATE INDEX IF NOT EXISTS idx_workspaces_updated    ON workspaces  (user_id, updated_at);

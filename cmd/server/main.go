@@ -33,7 +33,7 @@ func main() {
 	// ── Billing provider ──────────────────────────────────────────────────────
 	// OSS edition: quota is derived from the installed License JWT (or free
 	// defaults when no LICENSE_KEY is set). No external calls are made.
-	bp, err := local.New(cfg.LicenseKey, nil /* no public key in dev */)
+	bp, err := local.New(cfg.LicenseKey, nil /* no public key in dev */, database)
 	if err != nil {
 		log.Fatalf("billing provider: %v", err)
 	}

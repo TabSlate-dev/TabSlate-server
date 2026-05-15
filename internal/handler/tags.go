@@ -6,20 +6,21 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/tabslate/server/billing"
 	"github.com/tabslate/server/db"
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/model"
-	"github.com/tabslate/server/internal/plan"
 	"github.com/tabslate/server/internal/pubsub"
 )
 
 type TagHandler struct {
-	db  *db.DB
-	hub pubsub.Hub
+	db      *db.DB
+	hub     pubsub.Hub
+	billing billing.Provider
 }
 
-func NewTagHandler(d *db.DB, hub pubsub.Hub) *TagHandler {
-	return &TagHandler{db: d, hub: hub}
+func NewTagHandler(d *db.DB, hub pubsub.Hub, bp billing.Provider) *TagHandler {
+	return &TagHandler{db: d, hub: hub, billing: bp}
 }
 
 // GET /tags
@@ -50,9 +51,21 @@ func (h *TagHandler) Create(c *gin.Context) {
 	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 
-	if err := plan.CheckTag(ctx, h.db, userID); err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+	limits, err := h.billing.GetLimits(ctx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
 		return
+	}
+	if limits.MaxTags != -1 {
+		var count int
+		if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM tags WHERE user_id = $1 AND deleted_at IS NULL`, userID).Scan(&count); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			return
+		}
+		if count >= limits.MaxTags {
+			c.JSON(http.StatusForbidden, gin.H{"error": "tag limit reached", "code": "quota_exceeded"})
+			return
+		}
 	}
 
 	var req model.TagRequest

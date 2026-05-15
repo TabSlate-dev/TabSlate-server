@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tabslate/server/billing"
+	"github.com/tabslate/server/db"
 	"github.com/tabslate/server/internal/middleware"
 	"github.com/tabslate/server/internal/store"
 )
@@ -16,10 +17,25 @@ import (
 type BillingHandler struct {
 	billing billing.Provider
 	cache   store.Cache
+	db      *db.DB
 }
 
-func NewBillingHandler(bp billing.Provider, cache store.Cache) *BillingHandler {
-	return &BillingHandler{billing: bp, cache: cache}
+type planResponse struct {
+	Subscription *billing.Subscription `json:"subscription"`
+	Limits       *billing.Limits       `json:"limits"`
+	Usage        planUsage             `json:"usage"`
+}
+
+type planUsage struct {
+	Workspaces  int `json:"workspaces"`
+	Bookmarks   int `json:"bookmarks"`
+	Collections int `json:"collections"`
+	Tags        int `json:"tags"`
+	SavedGroups int `json:"saved_groups"`
+}
+
+func NewBillingHandler(bp billing.Provider, cache store.Cache, d *db.DB) *BillingHandler {
+	return &BillingHandler{billing: bp, cache: cache, db: d}
 }
 
 // GET /api/subscription
@@ -54,6 +70,72 @@ func (h *BillingHandler) GetLimits(c *gin.Context) {
 		h.cache.Set(ctx, cacheKey, raw, 60*time.Second)
 	}
 	c.JSON(http.StatusOK, limits)
+}
+
+// GET /api/plan
+func (h *BillingHandler) GetPlan(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID := middleware.UserID(c)
+
+	subscription, err := h.billing.GetSubscription(ctx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch subscription"})
+		return
+	}
+
+	limits, err := h.billing.GetLimits(ctx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch limits"})
+		return
+	}
+
+	usage := planUsage{}
+
+	if err := h.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM workspaces WHERE user_id = $1 AND deleted_at IS NULL`,
+		userID,
+	).Scan(&usage.Workspaces); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch usage"})
+		return
+	}
+
+	if err := h.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM bookmarks WHERE user_id = $1 AND deleted_at IS NULL AND is_trashed = 0`,
+		userID,
+	).Scan(&usage.Bookmarks); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch usage"})
+		return
+	}
+
+	if err := h.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM collections WHERE user_id = $1 AND is_deleted = 0`,
+		userID,
+	).Scan(&usage.Collections); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch usage"})
+		return
+	}
+
+	if err := h.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM tags WHERE user_id = $1 AND deleted_at IS NULL`,
+		userID,
+	).Scan(&usage.Tags); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch usage"})
+		return
+	}
+
+	if err := h.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM groups WHERE user_id = $1 AND deleted_at IS NULL`,
+		userID,
+	).Scan(&usage.SavedGroups); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch usage"})
+		return
+	}
+
+	c.JSON(http.StatusOK, planResponse{
+		Subscription: subscription,
+		Limits:       limits,
+		Usage:        usage,
+	})
 }
 
 // POST /api/checkout  body: {"plan_code": "pro"}

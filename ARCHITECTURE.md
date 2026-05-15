@@ -26,9 +26,10 @@ TabSlate-server/
 │   └── server.go            # Server 结构体：New、setupCORS、setupRoutes、Run、RegisterWebhook、SyncSubscription
 │
 ├── billing/
+│   ├── types.go             # 共享类型：Limits（MaxWorkspaces/MaxBookmarks/MaxCollections/MaxTags/MaxSavedGroups/TrashGraceDays），Subscription，Invoice
 │   ├── provider.go          # Provider 接口：OnUserCreated/GetLimits/GetSubscription/CreateCheckout/ListInvoices/CancelSubscription
 │   └── local/
-│       └── provider.go      # OSS 实现：从 License JWT 读取配额；无 License = 免费限额
+│       └── provider.go      # OSS 实现：启动时向 subscription_capacity 表写入 unlimited 行（-1），GetLimits 从表读取；DB 不可用时 fallback 到 -1 默认值
 │
 ├── db/
 │   ├── db.go                # DB 包装器（*pgxpool.Pool）；QueryRow/Exec/Query/BeginTx 等
@@ -44,7 +45,6 @@ TabSlate-server/
     │   ├── auth.go          # Bearer JWT 验证中间件
     │   └── ratelimit.go     # RateLimitByIP(limiter, limit, window)：接受 ratelimit.Limiter 接口
     ├── model/               # 请求/响应结构体、Plan 常量
-    ├── plan/                # 本地 DB 配额检查（过渡期）
     ├── pubsub/
     │   ├── hub.go           # Hub 接口：Subscribe / Broadcast / Unsubscribe
     │   ├── memory.go        # InMemoryHub（OSS 单机）
@@ -71,7 +71,7 @@ TabSlate-server/
         ├── cleanup.go       # CleanupHandler：后台 goroutine，每 24h 两阶段清理（见下文）
         ├── search.go        # GET /search?q=（书签全文搜索；最少 2 个 Unicode 字符；需 Bearer JWT）
         ├── sse.go           # GET /sync/stream（SSE 流；通过 pubsub.Hub 接收广播）
-        ├── billing.go       # GET+POST /api/subscription、/api/limits（limits 60s 缓存）
+        ├── billing.go       # GET /api/plan（subscription+limits+usage 汇总）、/api/subscription、/api/limits（60s 缓存）、/api/checkout、/api/invoices、DELETE /api/subscription
         └── captcha.go       # GET /captcha/widget、/captcha/widget.js
 ```
 
@@ -102,8 +102,9 @@ TabSlate-server/
 | POST | `/sync/push` | 批量推送本地变更（512KB 限制） | Bearer JWT |
 | GET | `/sync/pull` | 拉取指定 seq 之后的增量 | Bearer JWT |
 | GET | `/search` | 全文搜索书签（`?q=`，最少 2 字符，MeiliSearch） | Bearer JWT |
+| GET | `/api/plan` | 套餐 + 配额上限 + 当前使用量汇总 | Bearer JWT |
 | GET | `/api/subscription` | 当前订阅信息 | Bearer JWT |
-| GET | `/api/limits` | 当前配额限制 | Bearer JWT |
+| GET | `/api/limits` | 当前配额上限（60s 缓存） | Bearer JWT |
 | POST | `/api/checkout` | 创建结账会话（Cloud） | Bearer JWT |
 | GET | `/api/invoices` | 账单列表（Cloud） | Bearer JWT |
 | DELETE | `/api/subscription` | 取消订阅（Cloud） | Bearer JWT |
@@ -123,7 +124,7 @@ TabSlate-server/
 POST /sync/push  →  SyncHandler.Push
   1. 解析请求体（最大 512KB）
   2. 开启事务
-  3. 并行检查配额（`deleted_at IS NULL AND archived_at IS NULL` 的 collections 上限）
+  3. 调用 `billing.GetLimits()` 获取配额上限（事务外，结果复用于全部循环）；对 collections（`is_deleted = 0`）和 saved groups（`deleted_at IS NULL`）在事务内 COUNT 检查
   4. LWW upsert workspaces / collections / bookmarks / tags（各自独立 ON CONFLICT）
      + LWW upsert groups（同样 ON CONFLICT + WHERE updated_at 守卫）
      + 原子替换 group_tabs：DELETE WHERE group_id = $id，然后 bulk INSERT（stale group 被拒绝则跳过）
@@ -132,6 +133,7 @@ POST /sync/push  →  SyncHandler.Push
   7. h.hub.Broadcast(userID, seq)       // 通知所有 SSE 连接（in-memory 或 Redis pub/sub）
   8. 对成功 upsert 的书签触发 MeiliSearch upsert/delete（事务提交后，fire-and-forget）
   9. 返回 { server_seq, rejected: [] }
+     rejected 项结构：{ id, reason, type? }；reason = "quota_exceeded" 时携带 type = "collection" | "saved_group"
 ```
 
 ### Pull 流程
@@ -223,6 +225,7 @@ currentSeq(ctx, d *db.DB, userID) (int64, error)
 | `groups` | id, user_id, workspace_id, seq, deleted_at, **is_deleted INT** | `is_deleted`: 0/1/2 三态；软删除保留行 |
 | `group_tabs` | id, group_id FK→groups, title, url, favicon, position | 组内 tab；ON DELETE CASCADE；无 seq，整体快照替换 |
 | `refresh_tokens` | token_hash, user_id, expires_at | SHA-256 哈希存储，使用后轮换 |
+| `subscription_capacity` | plan_code PK, plan_id, max_workspaces, max_bookmarks, max_collections, max_tags, max_saved_groups, trash_grace_days, updated_at | 套餐配额；OSS 写 `unlimited`（全 -1）；Cloud 由 Meteroid 同步写入；-1 = 不限制 |
 
 **Delta-pull 索引**（`schema.pg.sql` 末尾）：
 ```sql
@@ -259,7 +262,7 @@ CREATE INDEX idx_group_tabs_group     ON group_tabs  (group_id);
 
 ```
 cmd/server/main.go
-  → local.New(licenseKey)                    # OSS billing.Provider
+  → local.New(licenseKey, pubkey, database)  # OSS billing.Provider（写 subscription_capacity）
   → app.New(cfg, db, provider, ctx)
       ├── infra.New(cfg.RedisURL)            # Providers{Hub, Cache, Limiter}；空 = in-memory
       ├── captcha.New(cfg.ProsopoSecret, ...)
@@ -268,7 +271,7 @@ cmd/server/main.go
       └── handler.New*(db, infra, search, ...)  # 各 handler 注入 Hub/Cache/Limiter
 ```
 
-Cloud 仓库只需将 `local.New(...)` 替换为 `lago.New(...)`，设置 `REDIS_URL`，并调用 `s.RegisterWebhook("/webhooks/lago", lagoHandler)` 即可实现水平扩展。
+Cloud 仓库只需将 `local.New(...)` 替换为 `meteroid.New(...)`，调用 `bp.Start(ctx)` 启动容量同步 goroutine，并设置 `REDIS_URL` 即可实现水平扩展。
 
 ## 认证机制
 

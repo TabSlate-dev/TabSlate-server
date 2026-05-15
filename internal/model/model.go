@@ -217,7 +217,8 @@ type SyncPushResponse struct {
 
 type Rejected struct {
 	ID     string `json:"id"`
-	Reason string `json:"reason"` // "stale" | "quota_exceeded"
+	Reason string `json:"reason"`          // "stale" | "quota_exceeded"
+	Type   string `json:"type,omitempty"` // "collection" | "saved_group" — set when reason is "quota_exceeded"
 }
 
 type SyncPullResponse struct {

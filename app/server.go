@@ -113,7 +113,7 @@ func (s *Server) RegisterWebhook(path string, h gin.HandlerFunc) {
 
 // SyncSubscription updates the local subscriptions table to match the billing
 // platform's state. Called by the Cloud edition when a Lago webhook confirms
-// a plan change, so that internal/plan quota checks stay accurate.
+// a plan change, so that billing-backed quota checks stay accurate.
 //
 // For active plans supply the Lago plan code (e.g. "pro") and status "active".
 // For terminated/cancelled subscriptions, supply planCode "free" and status "active"
@@ -178,14 +178,14 @@ func (s *Server) setupRoutes() {
 		s.cfg.RegisterCaptchaThreshold, s.cfg.RegisterCaptchaWindow,
 		s.cfg.OTPCaptchaThreshold, s.cfg.OTPCaptchaWindow)
 	captchaH := handler.NewCaptchaHandler(s.cfg.ProsopoBundleURL)
-	wsH := handler.NewWorkspaceHandler(s.db, s.infra.Hub)
-	colH := handler.NewCollectionHandler(s.db, s.infra.Hub)
-	bmH := handler.NewBookmarkHandler(s.db, s.search, s.infra.Hub)
-	tagH := handler.NewTagHandler(s.db, s.infra.Hub)
-	syncH := handler.NewSyncHandler(s.db, s.search, s.infra.Hub)
+	wsH := handler.NewWorkspaceHandler(s.db, s.infra.Hub, s.billing)
+	colH := handler.NewCollectionHandler(s.db, s.infra.Hub, s.billing)
+	bmH := handler.NewBookmarkHandler(s.db, s.search, s.infra.Hub, s.billing)
+	tagH := handler.NewTagHandler(s.db, s.infra.Hub, s.billing)
+	syncH := handler.NewSyncHandler(s.db, s.search, s.infra.Hub, s.billing)
 	searchH := handler.NewSearchHandler(s.search)
 	sseH := handler.NewSSEHandler(s.infra.Hub, s.infra.Cache)
-	billH := handler.NewBillingHandler(s.billing, s.infra.Cache)
+	billH := handler.NewBillingHandler(s.billing, s.infra.Cache, s.db)
 	prefH := handler.NewPreferencesHandler(s.db)
 
 	// ── Public routes ─────────────────────────────────────────────────────────
@@ -252,6 +252,7 @@ func (s *Server) setupRoutes() {
 		// Billing — behaviour varies by provider (OSS vs Cloud)
 		bill := api.Group("/api")
 		{
+			bill.GET("/plan", billH.GetPlan)
 			bill.GET("/subscription", billH.GetSubscription)
 			bill.GET("/limits", billH.GetLimits)
 			bill.POST("/checkout", billH.CreateCheckout)
