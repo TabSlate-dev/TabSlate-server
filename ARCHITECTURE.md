@@ -38,7 +38,7 @@ TabSlate-server/
 └── internal/
     ├── auth/                # JWT 签发/验证（HS256）、bcrypt、refresh token 生成
     ├── captcha/             # Prosopo procaptcha 验证；PROSOPO_SECRET 为空则跳过
-    ├── mailer/              # 邮件发送：SMTP 或 Resend；MAIL_PROVIDER 为空则禁用
+    ├── mailer/              # 邮件发送：SMTP、Resend 或 Amazon SES（SigV4）；MAIL_PROVIDER 为空则禁用
     ├── infra/
     │   └── infra.go         # Providers 工厂：REDIS_URL 非空 → Redis；空 → in-memory（OSS 单机）
     ├── middleware/
@@ -266,7 +266,7 @@ cmd/server/main.go
   → app.New(cfg, db, provider, ctx)
       ├── infra.New(cfg.RedisURL)            # Providers{Hub, Cache, Limiter}；空 = in-memory
       ├── captcha.New(cfg.ProsopoSecret, ...)
-      ├── mailer.New(cfg.MailProvider, ...)
+      ├── mailer.New(cfg.MailProvider, ...)  # smtp | resend | ses | "" (disabled)
       ├── search.New(cfg.MeiliSearchHost, cfg.MeiliSearchAPIKey)  # nil if not configured
       └── handler.New*(db, infra, search, ...)  # 各 handler 注入 Hub/Cache/Limiter
 ```
