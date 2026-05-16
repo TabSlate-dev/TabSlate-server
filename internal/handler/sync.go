@@ -320,11 +320,26 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 		return
 	}
 
-	// Collections
+	// Collections — is_default is computed via CTE: among active (non-deleted,
+	// non-archived) collections per workspace, the one with the lowest position
+	// is flagged as the default. This is a response-time annotation; no DB column.
 	colRows, err := h.db.Query(ctx,
-		`SELECT id, user_id, workspace_id, name, icon, position, seq, deleted_at, archived_at, is_deleted, created_at, updated_at
-         FROM collections WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
-		userID, afterSeq)
+		`WITH min_pos AS (
+			SELECT workspace_id, MIN(position) AS min_position
+			FROM collections
+			WHERE user_id = $1 AND workspace_id IS NOT NULL
+			  AND deleted_at IS NULL AND archived_at IS NULL AND is_deleted = 0
+			GROUP BY workspace_id
+		)
+		SELECT c.id, c.user_id, c.workspace_id, c.name, c.icon, c.position,
+		       c.seq, c.deleted_at, c.archived_at, c.is_deleted, c.created_at, c.updated_at,
+		       (c.deleted_at IS NULL AND c.archived_at IS NULL AND c.is_deleted = 0
+		        AND m.min_position IS NOT NULL AND c.position = m.min_position) AS is_default
+		FROM collections c
+		LEFT JOIN min_pos m ON m.workspace_id = c.workspace_id
+		WHERE c.user_id = $2 AND c.seq > $3
+		ORDER BY c.seq ASC`,
+		userID, userID, afterSeq)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "collections query failed"})
 		return
@@ -333,7 +348,8 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 	for colRows.Next() {
 		var col model.Collection
 		if err := colRows.Scan(&col.ID, &col.UserID, &col.WorkspaceID, &col.Name, &col.Icon, &col.Position,
-			&col.Seq, &col.DeletedAt, &col.ArchivedAt, &col.IsDeleted, &col.CreatedAt, &col.UpdatedAt); err != nil {
+			&col.Seq, &col.DeletedAt, &col.ArchivedAt, &col.IsDeleted, &col.CreatedAt, &col.UpdatedAt,
+			&col.IsDefault); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "collection scan failed"})
 			return
 		}

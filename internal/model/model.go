@@ -60,6 +60,7 @@ type Collection struct {
 	DeletedAt   *int64  `json:"deleted_at,omitempty"`
 	ArchivedAt  *int64  `json:"archived_at,omitempty"`
 	IsDeleted   int     `json:"is_deleted"`     // 0=active 1=trashed 2=permanently deleted
+	IsDefault   bool    `json:"is_default"`
 }
 
 // Bookmark is a saved URL.
