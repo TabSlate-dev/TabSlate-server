@@ -59,9 +59,13 @@ func New(cfg *Config, database *db.DB, bp billing.Provider, ctx context.Context)
 		SMTPPort:     cfg.SMTPPort,
 		SMTPUser:     cfg.SMTPUser,
 		SMTPPassword: cfg.SMTPPassword,
-		SMTPFrom:     cfg.SMTPFrom,
-		ResendAPIKey: cfg.ResendAPIKey,
-		ResendFrom:   cfg.ResendFrom,
+		SMTPFrom:       cfg.SMTPFrom,
+		ResendAPIKey:   cfg.ResendAPIKey,
+		ResendFrom:     cfg.ResendFrom,
+		SESAccessKeyID: cfg.SESAccessKeyID,
+		SESSecretKey:   cfg.SESSecretKey,
+		SESRegion:      cfg.SESRegion,
+		SESFrom:        cfg.SESFrom,
 	})
 	if m.Enabled() {
 		log.Printf("email provider: %s", cfg.MailProvider)

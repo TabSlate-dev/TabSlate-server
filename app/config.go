@@ -56,6 +56,12 @@ type Config struct {
 	ResendAPIKey string
 	ResendFrom   string
 
+	// SES
+	SESAccessKeyID string
+	SESSecretKey   string
+	SESRegion      string
+	SESFrom        string
+
 	// ── Registration captcha ─────────────────────────────────────────────────
 	// RegisterCaptchaThreshold is the number of successful registrations from a
 	// single IP within RegisterCaptchaWindow before captcha is required.
@@ -141,6 +147,11 @@ func LoadConfig() *Config {
 		SMTPFrom:      os.Getenv("SMTP_FROM"),
 		ResendAPIKey:  os.Getenv("RESEND_API_KEY"),
 		ResendFrom:    os.Getenv("RESEND_FROM"),
+
+		SESAccessKeyID: os.Getenv("SES_ACCESS_KEY_ID"),
+		SESSecretKey:   os.Getenv("SES_SECRET_KEY"),
+		SESRegion:      os.Getenv("SES_REGION"),
+		SESFrom:        os.Getenv("SES_FROM"),
 
 		// Registration captcha
 		RegisterCaptchaThreshold: envInt("REGISTER_CAPTCHA_THRESHOLD", 3),
