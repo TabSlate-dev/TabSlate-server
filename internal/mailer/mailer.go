@@ -27,6 +27,12 @@ type Mailer struct {
 	resendAPIKey string
 	resendFrom   string
 
+	// SES
+	sesAccessKeyID string
+	sesSecretKey   string
+	sesRegion      string
+	sesFrom        string
+
 	client *http.Client
 }
 
@@ -44,6 +50,12 @@ type Config struct {
 	// Resend
 	ResendAPIKey string
 	ResendFrom   string
+
+	// SES
+	SESAccessKeyID string
+	SESSecretKey   string
+	SESRegion      string
+	SESFrom        string
 }
 
 // New creates a Mailer from the given config.
@@ -58,6 +70,10 @@ func New(cfg Config) *Mailer {
 		smtpFrom:     cfg.SMTPFrom,
 		resendAPIKey: cfg.ResendAPIKey,
 		resendFrom:   cfg.ResendFrom,
+		sesAccessKeyID: cfg.SESAccessKeyID,
+		sesSecretKey:   cfg.SESSecretKey,
+		sesRegion:      cfg.SESRegion,
+		sesFrom:        cfg.SESFrom,
 		client: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -76,6 +92,8 @@ func (m *Mailer) Send(ctx context.Context, to, subject, htmlBody string) error {
 		return m.sendSMTP(to, subject, htmlBody)
 	case "resend":
 		return m.sendResend(ctx, to, subject, htmlBody)
+	case "ses":
+		return m.sendSES(ctx, to, subject, htmlBody)
 	default:
 		// Disabled — silently succeed so that dev environments work without email.
 		return nil
