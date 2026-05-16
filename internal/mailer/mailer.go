@@ -1,4 +1,4 @@
-// Package mailer provides email delivery via SMTP or Resend API.
+// Package mailer provides email delivery via SMTP, Resend, or Amazon SES.
 package mailer
 
 import (
@@ -14,7 +14,7 @@ import (
 // Mailer sends transactional emails.
 // If provider is empty, sending is a no-op (useful for dev / self-hosted without email).
 type Mailer struct {
-	provider string // "smtp", "resend", or "" (disabled)
+	provider string // "smtp", "resend", "ses", or "" (disabled)
 
 	// SMTP
 	smtpHost string

@@ -31,13 +31,10 @@ func TestSignSES_OutputFormat(t *testing.T) {
 		t.Fatalf("authorization missing Signature= field: %q", authorization)
 	}
 	sig := authorization[idx+len(sigPrefix):]
-	if len(sig) != 64 {
-		t.Errorf("signature length = %d, want 64 hex chars: %q", len(sig), sig)
-	}
-	for _, c := range sig {
-		if !strings.ContainsRune("0123456789abcdef", c) {
-			t.Errorf("signature contains non-hex char %q: %q", c, sig)
-			break
-		}
+	// Pinned value — guards against accidental changes to the HMAC key derivation
+	// order or string-to-sign construction. Computed from the fixed test inputs above.
+	const wantSig = "74672992aaca538d2adeb6289ea656ba984439fb1ffaf967f9883d70c35f0ab1"
+	if sig != wantSig {
+		t.Errorf("signature = %q, want %q", sig, wantSig)
 	}
 }
