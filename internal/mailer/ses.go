@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -75,7 +76,8 @@ func (m *Mailer) sendSES(ctx context.Context, to, subject, htmlBody string) erro
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("ses: unexpected status %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("ses: unexpected status %d: %s", resp.StatusCode, body)
 	}
 	return nil
 }
