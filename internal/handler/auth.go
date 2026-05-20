@@ -159,10 +159,6 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		uuid.NewString(), userID, now, now,
 	)
 	h.db.Exec(ctx,
-		`INSERT INTO workspaces (id, user_id, name, position, created_at, updated_at) VALUES ($1,$2,'My Workspace',0,$3,$4)`,
-		uuid.NewString(), userID, now, now,
-	)
-	h.db.Exec(ctx,
 		`INSERT INTO user_sync_seq (user_id, seq) VALUES ($1, 0) ON CONFLICT DO NOTHING`,
 		userID,
 	)

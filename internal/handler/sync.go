@@ -71,6 +71,31 @@ func (h *SyncHandler) Push(c *gin.Context) {
 
 	// ── Workspaces ────────────────────────────────────────────────────────────
 	for _, ws := range req.Entities.Workspaces {
+		if ws.DeletedAt == nil && limits.MaxWorkspaces != -1 {
+			var existingActive bool
+			err := tx.QueryRow(ctx,
+				`SELECT true FROM workspaces WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+				ws.ID, userID,
+			).Scan(&existingActive)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+				return
+			}
+			if !existingActive {
+				var count int
+				if err := tx.QueryRow(ctx,
+					`SELECT COUNT(*) FROM workspaces WHERE user_id = $1 AND deleted_at IS NULL`,
+					userID,
+				).Scan(&count); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+					return
+				}
+				if count >= limits.MaxWorkspaces {
+					rejected = append(rejected, model.Rejected{ID: ws.ID, Reason: "quota_exceeded", Type: "workspace"})
+					continue
+				}
+			}
+		}
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO workspaces (id, user_id, name, icon, color, position, seq, deleted_at, created_at, updated_at)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
