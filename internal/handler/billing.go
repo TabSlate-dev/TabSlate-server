@@ -100,7 +100,7 @@ func (h *BillingHandler) GetPlan(c *gin.Context) {
 	}
 
 	if err := h.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM bookmarks WHERE user_id = $1 AND deleted_at IS NULL AND is_trashed = 0`,
+		`SELECT COUNT(*) FROM bookmarks WHERE user_id = $1 AND is_trashed < 2`,
 		userID,
 	).Scan(&usage.Bookmarks); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch usage"})
