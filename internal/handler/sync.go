@@ -157,6 +157,18 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		}
 		if tag.RowsAffected() == 0 {
 			rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "stale"})
+		} else if col.IsDeleted == 2 {
+			// Cascade permanent deletion to any remaining bookmarks in this collection.
+			// The client pushes individual is_trashed:2 tombstones, but if that push
+			// was skipped (e.g. empty local IDB on a fresh session), bookmarks would
+			// stay at is_trashed=1 forever. This ensures the server is the final authority.
+			if _, err := tx.Exec(ctx,
+				`UPDATE bookmarks SET is_trashed = 2, deleted_at = $1, seq = $2, updated_at = $1
+				 WHERE user_id = $3 AND collection_id = $4 AND is_trashed < 2`,
+				now, seq, userID, col.ID); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark cascade failed"})
+				return
+			}
 		}
 	}
 

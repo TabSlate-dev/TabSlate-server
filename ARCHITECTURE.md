@@ -115,7 +115,7 @@ TabSlate-server/
 
 - **序列号**：每个用户在 `user_sync_seq` 表有单调递增计数器，每次 push 事务内 `incrementSeq` +1
 - **软删除**：所有实体表有 `deleted_at BIGINT` 列，删除操作写 `deleted_at = now` 而非 `DELETE`
-- **永久删除三态**：bookmarks 的 `is_trashed INT`、collections/groups 的 `is_deleted INT`：`0`=active，`1`=soft-deleted（回收站），`2`=permanently deleted（墓碑）。客户端 `permanentlyDelete*` 推送 state=2；Pull 响应原样返回 state=2 记录供其他设备同步删除
+- **永久删除三态**：bookmarks 的 `is_trashed INT`、collections/groups 的 `is_deleted INT`：`0`=active，`1`=soft-deleted（回收站），`2`=permanently deleted（墓碑）。客户端 `permanentlyDelete*` 推送 state=2；Pull 响应原样返回 state=2 记录供其他设备同步删除。**服务端级联**：Push 处理 collection `is_deleted=2` 时，服务端自动将该集合下所有 `is_trashed < 2` 的书签更新为 `is_trashed=2`（防止客户端未推送书签 tombstone 时产生孤儿书签）
 - **冲突解决（LWW）**：`ON CONFLICT (id) DO UPDATE ... WHERE updated_at < EXCLUDED.updated_at`，时间戳较大者胜出
 
 ### Push 流程
