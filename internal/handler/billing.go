@@ -108,7 +108,7 @@ func (h *BillingHandler) GetPlan(c *gin.Context) {
 	}
 
 	if err := h.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM collections WHERE user_id = $1 AND is_deleted = 0`,
+		`SELECT COUNT(*) FROM collections WHERE user_id = $1 AND is_deleted < 2`,
 		userID,
 	).Scan(&usage.Collections); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch usage"})

@@ -116,22 +116,22 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	for _, col := range req.Entities.Collections {
 		if col.DeletedAt == nil {
 			if limits.MaxCollections != -1 {
-				var existingNonTrashed bool
+				var existsInQuota bool
 				err := tx.QueryRow(ctx,
-					`SELECT true FROM collections WHERE id = $1 AND user_id = $2 AND is_deleted = 0`,
+					`SELECT true FROM collections WHERE id = $1 AND user_id = $2 AND is_deleted < 2`,
 					col.ID, userID,
-				).Scan(&existingNonTrashed)
+				).Scan(&existsInQuota)
 				if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 					c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
 					return
 				}
-				if existingNonTrashed {
+				if existsInQuota {
 					goto upsertCollection
 				}
 
 				var count int
 				if err := tx.QueryRow(ctx,
-					`SELECT COUNT(*) FROM collections WHERE user_id = $1 AND is_deleted = 0`,
+					`SELECT COUNT(*) FROM collections WHERE user_id = $1 AND is_deleted < 2`,
 					userID,
 				).Scan(&count); err != nil {
 					c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
