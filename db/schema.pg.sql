@@ -14,9 +14,14 @@ CREATE TABLE IF NOT EXISTS users (
     reset_attempts          INT NOT NULL DEFAULT 0,
     otp_last_sent_at        BIGINT,
     preferences             JSONB NOT NULL DEFAULT '{}',
+    billing_synced_at       BIGINT,
     created_at              BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
     updated_at              BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
 );
+
+-- Backfill: existing rows keep billing_synced_at = NULL (re-sync will be attempted on next
+-- GET /auth/me call, which is correct — the sync may genuinely be incomplete for old rows).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS billing_synced_at BIGINT;
 
 CREATE TABLE IF NOT EXISTS refresh_tokens (
     id         TEXT PRIMARY KEY,
