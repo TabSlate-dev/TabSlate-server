@@ -264,3 +264,64 @@ h.db.QueryRowContext(ctx, h.db.Rebind(`SELECT * FROM users WHERE email = ?`), em
 - **Collection `is_default` 字段**：`model.Collection` 含 `IsDefault bool \`json:"is_default"\`` 字段，由 Pull handler 的 CTE 计算（每个 workspace 中 `position` 最小的活跃集合 `is_default = true`，archived/trashed 集合不参与计算），**不存入 DB 列**，是查询时派生的只读字段。前端 `workspace-store.mergeFromServer` 读取此字段直接写入本地 state，不再本地推算 default 集合。
 - **Tag 模型缺少 UpdatedAt**：`model.Tag` 结构体无 `UpdatedAt` 字段，Pull handler 的 tag SELECT 因此只取 6 列（无 `updated_at`）；LWW 通过 `seq` 而非 `updated_at` 实现。
 - **Bookmark tag_ids**：`bookmarks` 表有 `tag_ids text[] NOT NULL DEFAULT '{}'` 列，存储该书签关联的 Tag ID 数组。`model.Bookmark.TagIDs []string` 对应此列；Push upsert 和 Pull SELECT 均包含 `tag_ids`；pgx 原生支持 `[]string ↔ text[]` 扫描，无需额外包。
+
+---
+
+## Karpathy 编码行为准则
+
+> 源自 [Andrej Karpathy 关于 LLM 编码陷阱的观察](https://x.com/karpathy/status/2015883857489522876)。这些准则偏向谨慎而非速度，对于琐碎任务请自行判断。
+
+### 1. 编码前思考
+
+**不要假设。不要隐藏困惑。呈现权衡。**
+
+实现前：
+- 明确说明假设。不确定时，询问而非猜测。
+- 若存在多种解释，全部呈现——不要默默选择。
+- 若有更简单的方案，说出来。应该提出异议时就提。
+- 遇到不清楚的地方，停下来，指出困惑所在，要求澄清。
+
+### 2. 简洁优先
+
+**用最少代码解决问题。不做推测性实现。**
+
+- 不添加未被要求的功能。
+- 不为一次性代码创建抽象层。
+- 不添加未被要求的"灵活性"或"可配置性"。
+- 不为不可能发生的场景做错误处理。
+- 如果 200 行代码可以写成 50 行，重写它。
+
+自问：资深工程师会觉得这过于复杂吗？如果是，简化。
+
+### 3. 精准修改
+
+**只碰必须碰的。只清理自己造成的混乱。**
+
+编辑现有代码时：
+- 不要"改进"相邻代码、注释或格式。
+- 不要重构没坏的东西。
+- 匹配现有风格，即使你更倾向于不同写法。
+- 发现无关死代码，提一下——不要删除它。
+
+当你的改动产生孤儿代码时：
+- 删除因你的改动而变得无用的导入/变量/函数。
+- 不删除已有死代码，除非被要求。
+
+检验标准：每一行修改都应能直接追溯到用户请求。
+
+### 4. 目标驱动执行
+
+**定义成功标准。循环验证直到达成。**
+
+将任务转化为可验证目标：
+- "添加验证" → "为无效输入编写测试，然后让它们通过"
+- "修复 bug" → "编写重现 bug 的测试，然后让它通过"
+- "重构 X" → "确保重构前后测试都能通过"
+
+多步骤任务先说明计划：
+```
+1. [步骤] → 验证: [检查]
+2. [步骤] → 验证: [检查]
+```
+
+**判断标准：** diff 中不必要改动更少，因过度复杂导致的重写更少，澄清问题在实现前提出。
