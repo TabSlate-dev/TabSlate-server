@@ -40,6 +40,44 @@ cp .env.example .env       # 填写 JWT_SECRET 和 DATABASE_URL
 docker compose up --build
 ```
 
+## API 路由概览
+
+🔒 = 需要 `Authorization: Bearer <accessToken>` 头。Groups/saved_groups 无独立 CRUD 端点，通过 `/sync/push` 和 `/sync/pull` 同步。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/auth/register` | 注册 |
+| POST | `/auth/login` | 登录 |
+| POST | `/auth/refresh` | 刷新 Access token |
+| POST | `/auth/logout` | 登出 |
+| POST | `/auth/verify-email` | 验证邮箱 OTP |
+| POST | `/auth/resend-verification` | 重发验证 OTP |
+| POST | `/auth/forgot-password` | 发送重置密码 OTP |
+| POST | `/auth/reset-password` | 重置密码 |
+| GET | `/auth/login-captcha-status` | 是否需要登录验证码 |
+| GET | `/auth/otp-captcha-status` | OTP 重发是否需要验证码 |
+| GET | `/auth/register-captcha-status` | 是否需要注册验证码 |
+| GET | `/captcha/widget` | Prosopo 验证码 iframe 页 |
+| GET | `/sync/stream` | SSE 实时推送（`?token=` 一次性鉴权） |
+| GET | `/auth/me` 🔒 | 当前用户信息 |
+| POST | `/auth/sse-token` 🔒 | 申请单次 SSE token（30s TTL） |
+| GET/PUT | `/preferences` 🔒 | 用户偏好设置 |
+| GET/POST/PUT/DELETE | `/workspaces[/:id]` 🔒 | 工作区 CRUD |
+| GET/POST/PUT/DELETE | `/collections[/:id]` 🔒 | 集合 CRUD |
+| GET/POST/PUT/DELETE | `/bookmarks[/:id]` 🔒 | 书签 CRUD |
+| GET/POST/PUT/DELETE | `/tags[/:id]` 🔒 | 标签 CRUD |
+| GET | `/search` 🔒 | 全文搜索（`?q=`，≥2 字符，需 MeiliSearch） |
+| POST | `/sync/push` 🔒 | 增量推送变更（含 groups） |
+| GET | `/sync/pull` 🔒 | 拉取服务端变更（`?since=<seq>`） |
+| GET | `/api/plan` 🔒 | 当前套餐及用量 |
+| GET | `/api/limits` 🔒 | 配额限制 |
+| GET | `/api/subscription` 🔒 | 订阅详情 |
+| POST | `/api/checkout` 🔒 | 创建结账会话（Cloud 用） |
+| GET | `/api/invoices` 🔒 | 账单列表 |
+| DELETE | `/api/subscription` 🔒 | 取消订阅 |
+
+---
+
 ## 架构要点
 
 ### 依赖注入模型
