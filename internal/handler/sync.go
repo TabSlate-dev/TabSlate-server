@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -69,106 +68,189 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	now := time.Now().UnixMilli()
 	var rejected []model.Rejected
 
-	// ── Workspaces ────────────────────────────────────────────────────────────
-	for _, ws := range req.Entities.Workspaces {
-		if ws.DeletedAt == nil && limits.MaxWorkspaces != -1 {
-			var existingActive bool
-			err := tx.QueryRow(ctx,
-				`SELECT true FROM workspaces WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
-				ws.ID, userID,
-			).Scan(&existingActive)
-			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	// ── Pre-fetch quota baselines ─────────────────────────────────────────────
+	// One query per quota-limited entity type, regardless of push size.
+	// Replaces the previous O(n) per-entity COUNT(*) pattern.
+
+	activeWSIDs := make(map[string]struct{})
+	wsQuotaCount := 0
+	if limits.MaxWorkspaces != -1 && len(req.Entities.Workspaces) > 0 {
+		rows, err := tx.Query(ctx,
+			`SELECT id FROM workspaces WHERE user_id = $1 AND deleted_at IS NULL`, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			return
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
 				return
 			}
-			if !existingActive {
-				var count int
-				if err := tx.QueryRow(ctx,
-					`SELECT COUNT(*) FROM workspaces WHERE user_id = $1 AND deleted_at IS NULL`,
-					userID,
-				).Scan(&count); err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
-					return
-				}
-				if count >= limits.MaxWorkspaces {
+			activeWSIDs[id] = struct{}{}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			return
+		}
+		wsQuotaCount = len(activeWSIDs)
+	}
+
+	activeColIDs := make(map[string]struct{})
+	colQuotaCount := 0
+	if limits.MaxCollections != -1 && len(req.Entities.Collections) > 0 {
+		rows, err := tx.Query(ctx,
+			`SELECT id FROM collections WHERE user_id = $1 AND is_deleted < 2`, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			return
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+				return
+			}
+			activeColIDs[id] = struct{}{}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			return
+		}
+		colQuotaCount = len(activeColIDs)
+	}
+
+	activeGroupIDs := make(map[string]struct{})
+	groupQuotaCount := 0
+	if limits.MaxSavedGroups != -1 && len(req.Entities.Groups) > 0 {
+		rows, err := tx.Query(ctx,
+			`SELECT id FROM groups WHERE user_id = $1 AND deleted_at IS NULL`, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			return
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+				return
+			}
+			activeGroupIDs[id] = struct{}{}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			return
+		}
+		groupQuotaCount = len(activeGroupIDs)
+	}
+
+	// ── Workspaces ────────────────────────────────────────────────────────────
+	var wsUpserts []model.Workspace
+	for _, ws := range req.Entities.Workspaces {
+		if ws.DeletedAt == nil && limits.MaxWorkspaces != -1 {
+			if _, exists := activeWSIDs[ws.ID]; !exists {
+				if wsQuotaCount >= limits.MaxWorkspaces {
 					rejected = append(rejected, model.Rejected{ID: ws.ID, Reason: "quota_exceeded", Type: "workspace"})
 					continue
 				}
+				wsQuotaCount++
 			}
 		}
-		tag, err := tx.Exec(ctx, `
-			INSERT INTO workspaces (id, user_id, name, icon, color, position, seq, deleted_at, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
-			ON CONFLICT (id) DO UPDATE
-			  SET name=$3, icon=$4, color=$5, position=$6, seq=$7, deleted_at=$8, updated_at=$9
-			WHERE workspaces.user_id = $2 AND workspaces.updated_at < $9`,
-			ws.ID, userID, ws.Name, ws.Icon, ws.Color, ws.Position, seq, ws.DeletedAt, now)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace upsert failed"})
-			return
+		wsUpserts = append(wsUpserts, ws)
+	}
+	if len(wsUpserts) > 0 {
+		batch := &pgx.Batch{}
+		for _, ws := range wsUpserts {
+			batch.Queue(`
+				INSERT INTO workspaces (id, user_id, name, icon, color, position, seq, deleted_at, created_at, updated_at)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
+				ON CONFLICT (id) DO UPDATE
+				  SET name=$3, icon=$4, color=$5, position=$6, seq=$7, deleted_at=$8, updated_at=$9
+				WHERE workspaces.user_id = $2 AND workspaces.updated_at < $9`,
+				ws.ID, userID, ws.Name, ws.Icon, ws.Color, ws.Position, seq, ws.DeletedAt, now)
 		}
-		if tag.RowsAffected() == 0 {
-			rejected = append(rejected, model.Rejected{ID: ws.ID, Reason: "stale"})
+		br := tx.SendBatch(ctx, batch)
+		for _, ws := range wsUpserts {
+			ct, err := br.Exec()
+			if err != nil {
+				br.Close()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace upsert failed"})
+				return
+			}
+			if ct.RowsAffected() == 0 {
+				rejected = append(rejected, model.Rejected{ID: ws.ID, Reason: "stale"})
+			}
 		}
+		br.Close()
 	}
 
 	// ── Collections ───────────────────────────────────────────────────────────
+	var colUpserts []model.Collection
 	for _, col := range req.Entities.Collections {
-		if col.DeletedAt == nil {
-			if limits.MaxCollections != -1 {
-				var existsInQuota bool
-				err := tx.QueryRow(ctx,
-					`SELECT true FROM collections WHERE id = $1 AND user_id = $2 AND is_deleted < 2`,
-					col.ID, userID,
-				).Scan(&existsInQuota)
-				if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
-					return
-				}
-				if existsInQuota {
-					goto upsertCollection
-				}
-
-				var count int
-				if err := tx.QueryRow(ctx,
-					`SELECT COUNT(*) FROM collections WHERE user_id = $1 AND is_deleted < 2`,
-					userID,
-				).Scan(&count); err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
-					return
-				}
-				if count >= limits.MaxCollections {
+		if col.DeletedAt == nil && limits.MaxCollections != -1 {
+			if _, exists := activeColIDs[col.ID]; !exists {
+				if colQuotaCount >= limits.MaxCollections {
 					rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "quota_exceeded", Type: "collection"})
 					continue
 				}
+				colQuotaCount++
 			}
 		}
-	upsertCollection:
-		tag, err := tx.Exec(ctx, `
-			INSERT INTO collections (id, user_id, workspace_id, name, icon, position, seq, deleted_at, archived_at, is_deleted, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
-			ON CONFLICT (id) DO UPDATE
-			  SET workspace_id=$3, name=$4, icon=$5, position=$6, seq=$7, deleted_at=$8, archived_at=$9, is_deleted=$10, updated_at=$11
-			WHERE collections.user_id = $2 AND collections.updated_at < $11`,
-			col.ID, userID, col.WorkspaceID, col.Name, col.Icon, col.Position, seq, col.DeletedAt, col.ArchivedAt, col.IsDeleted, now)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "collection upsert failed"})
-			return
+		colUpserts = append(colUpserts, col)
+	}
+	if len(colUpserts) > 0 {
+		batch := &pgx.Batch{}
+		for _, col := range colUpserts {
+			batch.Queue(`
+				INSERT INTO collections (id, user_id, workspace_id, name, icon, position, seq, deleted_at, archived_at, is_deleted, created_at, updated_at)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
+				ON CONFLICT (id) DO UPDATE
+				  SET workspace_id=$3, name=$4, icon=$5, position=$6, seq=$7, deleted_at=$8, archived_at=$9, is_deleted=$10, updated_at=$11
+				WHERE collections.user_id = $2 AND collections.updated_at < $11`,
+				col.ID, userID, col.WorkspaceID, col.Name, col.Icon, col.Position, seq, col.DeletedAt, col.ArchivedAt, col.IsDeleted, now)
 		}
-		if tag.RowsAffected() == 0 {
-			rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "stale"})
-		} else if col.IsDeleted == 2 {
-			// Cascade permanent deletion to any remaining bookmarks in this collection.
-			// The client pushes individual is_trashed:2 tombstones, but if that push
-			// was skipped (e.g. empty local IDB on a fresh session), bookmarks would
-			// stay at is_trashed=1 forever. This ensures the server is the final authority.
-			if _, err := tx.Exec(ctx,
-				`UPDATE bookmarks SET is_trashed = 2, deleted_at = $1, seq = $2, updated_at = $1
-				 WHERE user_id = $3 AND collection_id = $4 AND is_trashed < 2`,
-				now, seq, userID, col.ID); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark cascade failed"})
+		br := tx.SendBatch(ctx, batch)
+		var cascadeIDs []string
+		for _, col := range colUpserts {
+			ct, err := br.Exec()
+			if err != nil {
+				br.Close()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "collection upsert failed"})
 				return
 			}
+			if ct.RowsAffected() == 0 {
+				rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "stale"})
+			} else if col.IsDeleted == 2 {
+				// Cascade permanent deletion to any remaining bookmarks in this collection.
+				// The client pushes individual is_trashed:2 tombstones, but if that push
+				// was skipped (e.g. empty local IDB on a fresh session), bookmarks would
+				// stay at is_trashed=1 forever. This ensures the server is the final authority.
+				cascadeIDs = append(cascadeIDs, col.ID)
+			}
+		}
+		br.Close()
+		if len(cascadeIDs) > 0 {
+			cb := &pgx.Batch{}
+			for _, colID := range cascadeIDs {
+				cb.Queue(`UPDATE bookmarks SET is_trashed = 2, deleted_at = $1, seq = $2, updated_at = $1
+					 WHERE user_id = $3 AND collection_id = $4 AND is_trashed < 2`,
+					now, seq, userID, colID)
+			}
+			cbr := tx.SendBatch(ctx, cb)
+			for range cascadeIDs {
+				if _, err := cbr.Exec(); err != nil {
+					cbr.Close()
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark cascade failed"})
+					return
+				}
+			}
+			cbr.Close()
 		}
 	}
 
@@ -176,120 +258,148 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	var searchDeletes []string
 
 	// ── Bookmarks ─────────────────────────────────────────────────────────────
-	for _, bm := range req.Entities.Bookmarks {
-		tagIDs := bm.TagIDs
-		if tagIDs == nil {
-			tagIDs = []string{}
+	if len(req.Entities.Bookmarks) > 0 {
+		batch := &pgx.Batch{}
+		for _, bm := range req.Entities.Bookmarks {
+			tagIDs := bm.TagIDs
+			if tagIDs == nil {
+				tagIDs = []string{}
+			}
+			batch.Queue(`
+				INSERT INTO bookmarks (id, user_id, collection_id, title, url, favicon_url, description,
+				                       is_favorite, is_archived, is_trashed, position, seq, deleted_at, created_at, updated_at, tag_ids)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15)
+				ON CONFLICT (id) DO UPDATE
+				  SET collection_id=$3, title=$4, url=$5, favicon_url=$6, description=$7,
+				      is_favorite=$8, is_archived=$9, is_trashed=$10, position=$11, seq=$12, deleted_at=$13, updated_at=$14, tag_ids=$15
+				WHERE bookmarks.user_id = $2 AND bookmarks.updated_at < $14`,
+				bm.ID, userID, bm.CollectionID, bm.Title, bm.URL, bm.FaviconURL, bm.Description,
+				bm.IsFavorite, bm.IsArchived, bm.IsTrashed, bm.Position, seq, bm.DeletedAt, now, tagIDs)
 		}
-		tag, err := tx.Exec(ctx, `
-			INSERT INTO bookmarks (id, user_id, collection_id, title, url, favicon_url, description,
-			                       is_favorite, is_archived, is_trashed, position, seq, deleted_at, created_at, updated_at, tag_ids)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15)
-			ON CONFLICT (id) DO UPDATE
-			  SET collection_id=$3, title=$4, url=$5, favicon_url=$6, description=$7,
-			      is_favorite=$8, is_archived=$9, is_trashed=$10, position=$11, seq=$12, deleted_at=$13, updated_at=$14, tag_ids=$15
-			WHERE bookmarks.user_id = $2 AND bookmarks.updated_at < $14`,
-			bm.ID, userID, bm.CollectionID, bm.Title, bm.URL, bm.FaviconURL, bm.Description,
-			bm.IsFavorite, bm.IsArchived, bm.IsTrashed, bm.Position, seq, bm.DeletedAt, now, tagIDs)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark upsert failed"})
-			return
-		}
-		if tag.RowsAffected() == 0 {
-			rejected = append(rejected, model.Rejected{ID: bm.ID, Reason: "stale"})
-		} else {
-			if bm.DeletedAt != nil || bm.IsTrashed > 0 {
-				searchDeletes = append(searchDeletes, bm.ID)
+		br := tx.SendBatch(ctx, batch)
+		for _, bm := range req.Entities.Bookmarks {
+			ct, err := br.Exec()
+			if err != nil {
+				br.Close()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark upsert failed"})
+				return
+			}
+			if ct.RowsAffected() == 0 {
+				rejected = append(rejected, model.Rejected{ID: bm.ID, Reason: "stale"})
 			} else {
-				searchUpserts = append(searchUpserts, search.BookmarkDoc{
-					ID:           bm.ID,
-					UserID:       userID,
-					Title:        bm.Title,
-					URL:          bm.URL,
-					Description:  bm.Description,
-					CollectionID: derefStr(bm.CollectionID),
-					IsArchived:   bm.IsArchived,
-				})
+				if bm.DeletedAt != nil || bm.IsTrashed > 0 {
+					searchDeletes = append(searchDeletes, bm.ID)
+				} else {
+					searchUpserts = append(searchUpserts, search.BookmarkDoc{
+						ID:           bm.ID,
+						UserID:       userID,
+						Title:        bm.Title,
+						URL:          bm.URL,
+						Description:  bm.Description,
+						CollectionID: derefStr(bm.CollectionID),
+						IsArchived:   bm.IsArchived,
+					})
+				}
 			}
 		}
+		br.Close()
 	}
 
 	// ── Tags ──────────────────────────────────────────────────────────────────
-	for _, t := range req.Entities.Tags {
-		res, err := tx.Exec(ctx, `
-			INSERT INTO tags (id, user_id, name, color, seq, deleted_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7)
-			ON CONFLICT (id) DO UPDATE
-			  SET name=$3, color=$4, seq=$5, deleted_at=$6, updated_at=$7
-			WHERE tags.user_id = $2 AND tags.updated_at < $7`,
-			t.ID, userID, t.Name, t.Color, seq, t.DeletedAt, now)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "tag upsert failed"})
-			return
+	if len(req.Entities.Tags) > 0 {
+		batch := &pgx.Batch{}
+		for _, t := range req.Entities.Tags {
+			batch.Queue(`
+				INSERT INTO tags (id, user_id, name, color, seq, deleted_at, updated_at)
+				VALUES ($1,$2,$3,$4,$5,$6,$7)
+				ON CONFLICT (id) DO UPDATE
+				  SET name=$3, color=$4, seq=$5, deleted_at=$6, updated_at=$7
+				WHERE tags.user_id = $2 AND tags.updated_at < $7`,
+				t.ID, userID, t.Name, t.Color, seq, t.DeletedAt, now)
 		}
-		if res.RowsAffected() == 0 {
-			rejected = append(rejected, model.Rejected{ID: t.ID, Reason: "stale"})
+		br := tx.SendBatch(ctx, batch)
+		for _, t := range req.Entities.Tags {
+			ct, err := br.Exec()
+			if err != nil {
+				br.Close()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "tag upsert failed"})
+				return
+			}
+			if ct.RowsAffected() == 0 {
+				rejected = append(rejected, model.Rejected{ID: t.ID, Reason: "stale"})
+			}
 		}
+		br.Close()
 	}
 
-	// ── Groups ────────────────────────────────────────────────────────────────────
+	// ── Groups ────────────────────────────────────────────────────────────────
+	var groupUpserts []model.Group
 	for _, g := range req.Entities.Groups {
 		if g.DeletedAt == nil && limits.MaxSavedGroups != -1 {
-			var existingActive bool
-			err := tx.QueryRow(ctx,
-				`SELECT true FROM groups WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
-				g.ID, userID,
-			).Scan(&existingActive)
-			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			if _, exists := activeGroupIDs[g.ID]; !exists {
+				if groupQuotaCount >= limits.MaxSavedGroups {
+					rejected = append(rejected, model.Rejected{ID: g.ID, Reason: "quota_exceeded", Type: "saved_group"})
+					continue
+				}
+				groupQuotaCount++
+			}
+		}
+		groupUpserts = append(groupUpserts, g)
+	}
+	if len(groupUpserts) > 0 {
+		batch := &pgx.Batch{}
+		for _, g := range groupUpserts {
+			batch.Queue(`
+				INSERT INTO groups (id, user_id, name, color, is_compact, seq, deleted_at, is_deleted, created_at, updated_at, workspace_id)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10)
+				ON CONFLICT (id) DO UPDATE
+				  SET name=$3, color=$4, is_compact=$5, seq=$6, deleted_at=$7, is_deleted=$8, updated_at=$9, workspace_id=$10
+				WHERE groups.user_id = $2 AND groups.updated_at < $9`,
+				g.ID, userID, g.Name, g.Color, g.IsCompact, seq, g.DeletedAt, g.IsDeleted, now, g.WorkspaceID)
+		}
+		br := tx.SendBatch(ctx, batch)
+		var acceptedGroups []model.Group
+		for _, g := range groupUpserts {
+			ct, err := br.Exec()
+			if err != nil {
+				br.Close()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "group upsert failed"})
 				return
 			}
-			if existingActive {
-				goto upsertGroup
-			}
-
-			var count int
-			if err := tx.QueryRow(ctx,
-				`SELECT COUNT(*) FROM groups WHERE user_id = $1 AND deleted_at IS NULL`,
-				userID,
-			).Scan(&count); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
-				return
-			}
-			if count >= limits.MaxSavedGroups {
-				rejected = append(rejected, model.Rejected{ID: g.ID, Reason: "quota_exceeded", Type: "saved_group"})
-				continue
+			if ct.RowsAffected() == 0 {
+				rejected = append(rejected, model.Rejected{ID: g.ID, Reason: "stale"})
+			} else {
+				acceptedGroups = append(acceptedGroups, g)
 			}
 		}
-
-	upsertGroup:
-		tag, err := tx.Exec(ctx, `
-			INSERT INTO groups (id, user_id, name, color, is_compact, seq, deleted_at, is_deleted, created_at, updated_at, workspace_id)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10)
-			ON CONFLICT (id) DO UPDATE
-			  SET name=$3, color=$4, is_compact=$5, seq=$6, deleted_at=$7, is_deleted=$8, updated_at=$9, workspace_id=$10
-			WHERE groups.user_id = $2 AND groups.updated_at < $9`,
-			g.ID, userID, g.Name, g.Color, g.IsCompact, seq, g.DeletedAt, g.IsDeleted, now, g.WorkspaceID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "group upsert failed"})
-			return
-		}
-		if tag.RowsAffected() == 0 {
-			rejected = append(rejected, model.Rejected{ID: g.ID, Reason: "stale"})
-			continue
-		}
-		// Atomically replace the tab snapshot for this group.
-		if _, err := tx.Exec(ctx, `DELETE FROM group_tabs WHERE group_id = $1`, g.ID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "group_tabs clear failed"})
-			return
-		}
-		for _, t := range g.Tabs {
-			if _, err := tx.Exec(ctx,
-				`INSERT INTO group_tabs (id, group_id, title, url, favicon, position) VALUES ($1,$2,$3,$4,$5,$6)`,
-				t.ID, g.ID, t.Title, t.URL, t.Favicon, t.Position); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "group_tab insert failed"})
-				return
+		br.Close()
+		// Atomically replace tab snapshots for all accepted groups in one batch.
+		if len(acceptedGroups) > 0 {
+			tabBatch := &pgx.Batch{}
+			for _, g := range acceptedGroups {
+				tabBatch.Queue(`DELETE FROM group_tabs WHERE group_id = $1`, g.ID)
+				for _, t := range g.Tabs {
+					tabBatch.Queue(
+						`INSERT INTO group_tabs (id, group_id, title, url, favicon, position) VALUES ($1,$2,$3,$4,$5,$6)`,
+						t.ID, g.ID, t.Title, t.URL, t.Favicon, t.Position)
+				}
 			}
+			tbr := tx.SendBatch(ctx, tabBatch)
+			for _, g := range acceptedGroups {
+				if _, err := tbr.Exec(); err != nil { // DELETE
+					tbr.Close()
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "group_tabs clear failed"})
+					return
+				}
+				for range g.Tabs {
+					if _, err := tbr.Exec(); err != nil { // INSERT tab
+						tbr.Close()
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "group_tab insert failed"})
+						return
+					}
+				}
+			}
+			tbr.Close()
 		}
 	}
 
@@ -300,12 +410,8 @@ func (h *SyncHandler) Push(c *gin.Context) {
 
 	h.hub.Broadcast(userID, seq)
 
-	for _, doc := range searchUpserts {
-		h.search.UpsertBookmark(doc)
-	}
-	for _, id := range searchDeletes {
-		h.search.DeleteBookmark(id)
-	}
+	h.search.BulkUpsertAsync(searchUpserts)
+	h.search.BulkDeleteAsync(searchDeletes)
 
 	if rejected == nil {
 		rejected = []model.Rejected{}

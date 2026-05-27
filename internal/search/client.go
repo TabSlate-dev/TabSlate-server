@@ -72,6 +72,34 @@ func (c *Client) UpsertBookmark(doc BookmarkDoc) {
 	}()
 }
 
+// BulkUpsertAsync adds or updates multiple documents in a single HTTP call.
+// Fire-and-forget goroutine — avoids the N-goroutine / N-connection storm that
+// arises when UpsertBookmark is called in a loop for large imports.
+func (c *Client) BulkUpsertAsync(docs []BookmarkDoc) {
+	if c == nil || len(docs) == 0 {
+		return
+	}
+	go func() {
+		pk := "id"
+		if _, err := c.index.AddDocuments(docs, &meilisearch.DocumentOptions{PrimaryKey: &pk}); err != nil {
+			log.Printf("[search] bulkUpsertBookmarks %d docs: %v", len(docs), err)
+		}
+	}()
+}
+
+// BulkDeleteAsync removes multiple documents from the index in a single HTTP call.
+// Fire-and-forget goroutine.
+func (c *Client) BulkDeleteAsync(ids []string) {
+	if c == nil || len(ids) == 0 {
+		return
+	}
+	go func() {
+		if _, err := c.index.DeleteDocuments(ids, nil); err != nil {
+			log.Printf("[search] bulkDeleteBookmarks %d docs: %v", len(ids), err)
+		}
+	}()
+}
+
 // BulkUpsert adds or updates multiple documents synchronously in a single call.
 // Used by the reindex CLI tool for efficient batch indexing.
 func (c *Client) BulkUpsert(docs []BookmarkDoc) error {
