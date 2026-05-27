@@ -124,7 +124,7 @@ TabSlate-server/
 POST /sync/push  →  SyncHandler.Push
   1. 解析请求体（最大 512KB）
   2. 开启事务
-  3. 调用 `billing.GetLimits()` 获取配额上限（事务外，结果复用于全部循环）；对 collections（`is_deleted = 0`）和 saved groups（`deleted_at IS NULL`）在事务内 COUNT 检查
+  3. 调用 `billing.GetLimits()` 获取配额上限（事务外，结果复用于全部循环）；对 quota 受限类型（workspaces/collections/groups）在事务内**预取**所有活跃实体 ID 到内存 map（每类型一条查询，仅当 push payload 中有该类型时触发）；后续逐实体检查 `count >= limit` 时在 O(1) map 内完成，避免 per-entity COUNT（已消除 O(n) 查询风暴）
   4. LWW upsert workspaces / collections / bookmarks / tags（各自独立 ON CONFLICT）
      + LWW upsert groups（同样 ON CONFLICT + WHERE updated_at 守卫）
      + 原子替换 group_tabs：DELETE WHERE group_id = $id，然后 bulk INSERT（stale group 被拒绝则跳过）
@@ -243,7 +243,8 @@ CREATE INDEX idx_group_tabs_group     ON group_tabs  (group_id);
 
 - `MEILISEARCH_HOST` 为空 → `search.New()` 返回 `nil`，所有方法均为 no-op，服务正常启动但不索引
 - 非空 → 在 `bookmarks` 索引上设置 `FilterableAttributes: ["userId"]`，`SearchableAttributes: ["title", "url", "description"]`
-- `UpsertBookmark` / `DeleteBookmark` 均为 fire-and-forget goroutine，失败时记录日志但不影响 HTTP 响应
+- `UpsertBookmark` / `DeleteBookmark` — 单条 fire-and-forget goroutine（REST 路径：`/bookmarks` CRUD）
+- `BulkUpsertAsync` / `BulkDeleteAsync` — 批量 fire-and-forget goroutine（sync push 路径：将当次 push 中所有成功的书签一次性提交到索引，避免 N-goroutine / N-connection 风暴）；失败时记录日志但不影响 HTTP 响应
 - `SearchBookmarks` 在查询时强制追加 `Filter: userId = "<userID>"`，确保跨用户数据隔离
 
 **触发时机：**
