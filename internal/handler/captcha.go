@@ -43,6 +43,9 @@ const bundleURL = self_.searchParams.get('bundle')
 const p = new URLSearchParams(location.search);
 const siteKey = p.get('siteKey');
 const theme = p.get('theme') || 'light';
+// parentOrigin is the chrome-extension:// origin passed by the embedder.
+// Falls back to '*' only when unset (e.g. during local testing).
+const parentOrigin = p.get('parentOrigin') || '*';
 
 // Inject the Prosopo bundle and wait for it to register window.procaptcha.
 await new Promise((resolve, reject) => {
@@ -64,7 +67,7 @@ const opts = {
   siteKey,
   theme,
   callback(token) {
-    parent.postMessage({ type: 'procaptcha-token', token }, '*');
+    parent.postMessage({ type: 'procaptcha-token', token }, parentOrigin);
   },
 };
 if (captchaType) opts.captchaType = captchaType;
@@ -73,7 +76,7 @@ window.procaptcha.render(document.getElementById('c'), opts);
 
 // Notify the parent frame of the widget's actual height for iframe resizing.
 new ResizeObserver(() => {
-  parent.postMessage({ type: 'procaptcha-resize', height: document.body.scrollHeight }, '*');
+  parent.postMessage({ type: 'procaptcha-resize', height: document.body.scrollHeight }, parentOrigin);
 }).observe(document.body);
 `
 
@@ -115,7 +118,7 @@ func (h *CaptchaHandler) Widget(c *gin.Context) {
 			"style-src 'unsafe-inline'; "+
 			"connect-src "+connectSrc+"; "+
 			"img-src https: data:; "+
-			"frame-ancestors http: https: chrome-extension:")
+			"frame-ancestors chrome-extension:")
 
 	html := fmt.Sprintf(captchaWidgetHTMLTmpl, url.QueryEscape(h.bundleURL))
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))

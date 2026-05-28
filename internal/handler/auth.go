@@ -553,12 +553,18 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		return
 	}
 
-	h.db.Exec(ctx, `DELETE FROM refresh_tokens WHERE token_hash = $1`, tokenHash)
+	if _, err := h.db.Exec(ctx, `DELETE FROM refresh_tokens WHERE token_hash = $1`, tokenHash); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to invalidate refresh token"})
+		return
+	}
 
 	var user model.User
-	h.db.QueryRow(ctx,
+	if err := h.db.QueryRow(ctx,
 		`SELECT id, name, email, is_verified, created_at, updated_at FROM users WHERE id = $1`, userID,
-	).Scan(&user.ID, &user.Name, &user.Email, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt)
+	).Scan(&user.ID, &user.Name, &user.Email, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired refresh token"})
+		return
+	}
 
 	resp, err := h.issueTokens(&user)
 	if err != nil {

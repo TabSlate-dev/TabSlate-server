@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -51,10 +52,17 @@ func (h *PreferencesHandler) Update(c *gin.Context) {
 	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64*1024)
+
 	// Read the raw body and validate it is a JSON object.
 	var body json.RawMessage
 	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "request body must be valid JSON"})
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large (max 64 KB)"})
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "request body must be valid JSON"})
+		}
 		return
 	}
 

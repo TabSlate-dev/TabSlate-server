@@ -52,7 +52,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		return
 	}
 
-	tx, err := h.db.Begin(ctx)
+	tx, err := h.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "tx begin failed"})
 		return
