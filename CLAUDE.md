@@ -9,7 +9,7 @@ TabSlate 由三个仓库组成：
 | 仓库 | 可见性 | 职责 |
 |---|---|---|
 | **`TabSlate`** | 公开，AGPL | Chrome 扩展前端，TypeScript + React + WXT |
-| **`TabSlate-server`**（本仓库） | 公开，AGPL | Go 后端 OSS 版，可自托管，计费基于本地 License JWT |
+| **`TabSlate-server`**（本仓库） | 公开，非开源 | Go 后端，提供免费版，可自托管，计费基于本地 License JWT |
 | **`TabSlate-cloud`** | 私有 | Go 后端 Cloud 版，以本仓库为 Go module 依赖，注入 Meteroid 计费 |
 
 `TabSlate-cloud` 通过 `require github.com/tabslate/server` + `replace` 指令引用本仓库，仅需替换 `billing.Provider` 实现即可获得完整后端能力。Cloud 仓库可直接导入本仓库的 `billing/`、`db/`、`app/` 公开包，`internal/` 包对外部模块不可见（Go 模块系统强制）。
@@ -18,8 +18,8 @@ TabSlate 由三个仓库组成：
 
 ## 项目概述
 
-TabSlate-server 是 TabSlate Chrome 扩展的后端 OSS 版，Go 编写：
-- **OSS 版**（本仓库）：MIT License，计费基于本地 License JWT，无外部依赖，支持自托管
+TabSlate-server 是 TabSlate Chrome 扩展的后端，Go 编写：
+- **免费版**（本仓库）：非开源，提供免费版，计费基于本地 License JWT，无外部依赖，支持自托管
 - **Cloud 版**（私有仓库 `TabSlate-cloud`）：导入本仓库作为依赖，注入 `meteroid.Provider` 实现在线计费
 
 详细架构说明见 [ARCHITECTURE.md](ARCHITECTURE.md)。
