@@ -19,7 +19,7 @@ cmd/server/main.go
 ```
 TabSlate-server/
 ├── cmd/server/
-│   └── main.go              # 入口：LoadConfig → db.Open → billing.New → app.New → s.Run()
+│   └── main.go              # 入口：LoadConfig → db.Open → local.New → bp.Start → app.New → s.Run()
 │
 ├── app/
 │   ├── config.go            # Config（LoadConfig 从环境变量读取）
@@ -29,7 +29,9 @@ TabSlate-server/
 │   ├── types.go             # 共享类型：Limits（MaxWorkspaces/MaxBookmarks/MaxCollections/MaxTags/MaxSavedGroups/TrashGraceDays），Subscription，Invoice
 │   ├── provider.go          # Provider 接口：OnUserCreated/GetLimits/GetSubscription/CreateCheckout/ListInvoices/CancelSubscription
 │   └── local/
-│       └── provider.go      # OSS 实现：启动时向 subscription_capacity 表写入 unlimited 行（-1），GetLimits 从表读取；DB 不可用时 fallback 到 -1 默认值
+│       ├── provider.go      # OSS 实现：keygen.sh License 验证用户数上限；超限用户自动暂停（suspended_at）+ 吊销 refresh token；实现 billing.InstanceLimiter
+│       ├── keygen.go        # keygenClient：FetchLicense / ActivateMachine / ValidateMachine；KeygenAPIURL + KeygenAccountID 编译时写入（-ldflags -X）
+│       └── license_cache.go # licenseCache：TTL 缓存 keygenLicense；maxUsers() 返回 License metadata 中的用户数上限（或 Free 默认 3）
 │
 ├── db/
 │   ├── db.go                # DB 包装器（*pgxpool.Pool）；QueryRow/Exec/Query/BeginTx 等
@@ -216,7 +218,8 @@ currentSeq(ctx, d *db.DB, userID) (int64, error)
 
 | 表 | 关键列 | 说明 |
 |---|---|---|
-| `users` | id, email, password_hash, is_verified | 用户基础信息 |
+| `users` | id, email, password_hash, is_verified, **suspended_at BIGINT** | 用户基础信息；`suspended_at` 非空 = 已被 License 限制暂停，禁止登录/刷新 token |
+| `server_config` | key TEXT PK, value TEXT | 服务端持久化 KV；目前仅存 `license_machine_fingerprint`（UUIDv4，keygen.sh 机器激活用） |
 | `user_sync_seq` | user_id PK, seq BIGINT | 每用户同步序列计数器 |
 | `workspaces` | id, user_id, seq, deleted_at | 含同步字段 |
 | `collections` | id, user_id, workspace_id, seq, deleted_at, archived_at, **is_deleted INT** | `archived_at` 非空 = 已归档；`is_deleted`: 0/1/2 三态 |
@@ -263,7 +266,8 @@ CREATE INDEX idx_group_tabs_group     ON group_tabs  (group_id);
 
 ```
 cmd/server/main.go
-  → local.New(licenseKey, pubkey, database)  # OSS billing.Provider（写 subscription_capacity）
+  → local.New(licenseKey, database)  # OSS billing.Provider；licenseKey 空 = Free（3 用户）
+  → bp.Start(ctx)                    # 机器激活 + 初始 License 同步 + 后台刷新 goroutine（1h）
   → app.New(cfg, db, provider, ctx)
       ├── infra.New(cfg.RedisURL)            # Providers{Hub, Cache, Limiter}；空 = in-memory
       ├── captcha.New(cfg.ProsopoSecret, ...)
