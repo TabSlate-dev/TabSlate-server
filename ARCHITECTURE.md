@@ -41,6 +41,9 @@ TabSlate-server/
     ├── auth/                # JWT 签发/验证（HS256）、bcrypt、refresh token 生成
     ├── captcha/             # Prosopo procaptcha 验证；PROSOPO_SECRET 为空则跳过
     ├── mailer/              # 邮件发送：SMTP、Resend 或 Amazon SES（SigV4）；MAIL_PROVIDER 为空则禁用
+    │   ├── mailer.go        # Mailer 结构体；New() 解析嵌入模板；SendOTP(ctx, to, name, code, purpose, lang) 查翻译 → 渲染 otp.html → Send()
+    │   └── templates/
+    │       └── otp.html     # 品牌化 HTML 邮件模板（embed.FS 嵌入二进制）；变量：{{.Name/Heading/Intro/Code/Note/PrivacyText/PrivacyURL/TermsText/TermsURL}}
     ├── infra/
     │   └── infra.go         # Providers 工厂：REDIS_URL 非空 → Redis；空 → in-memory（OSS 单机）
     ├── middleware/
@@ -63,7 +66,7 @@ TabSlate-server/
     │   ├── memory.go        # InMemoryCache（lazy 过期 + 30s 后台清扫）
     │   └── redis.go         # RedisCache（TTL 由 Redis 原生管理）
     └── handler/
-        ├── auth.go          # 注册、登录、OTP 验证、密码重置、SSE token 签发
+        ├── auth.go          # 注册、登录、OTP 验证、密码重置、SSE token 签发；parseLang(acceptLang) 将 Accept-Language 映射为 "zh"/"en"；sendOTPEmail 读取 Accept-Language 后在 goroutine 外提取 lang，再调 mailer.SendOTP
         ├── workspaces.go    # CRUD /workspaces
         ├── collections.go   # CRUD /collections
         ├── bookmarks.go     # CRUD /bookmarks；Create/Update/Delete 后触发 MeiliSearch upsert/delete（fire-and-forget）
