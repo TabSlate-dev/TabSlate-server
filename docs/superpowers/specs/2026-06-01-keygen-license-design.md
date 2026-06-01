@@ -54,12 +54,12 @@ TabSlate-server/
 ├── billing/
 │   ├── provider.go          MODIFIED  — add InstanceLimiter interface
 │   └── local/
-│       ├── keygen.go        NEW       — keygen.sh HTTP client
+│       ├── keygen.go        NEW       — keygen.sh HTTP client; compile-time KeygenAPIURL + KeygenAccountID vars
 │       ├── license_cache.go NEW       — TTL cache + background refresh + enforceUserLimit
 │       ├── provider.go      MODIFIED  — replace JWT with keygen cache; implement InstanceLimiter; add Start()
 │       └── license.go       DELETED   — JWT parsing logic no longer needed
 ├── app/
-│   └── config.go            MODIFIED  — add KEYGEN_API_URL, KEYGEN_ACCOUNT_ID, KEYGEN_LICENSE_KEY
+│   └── config.go            MODIFIED  — add KEYGEN_LICENSE_KEY (runtime only); remove LicenseKey
 ├── cmd/server/
 │   └── main.go              MODIFIED  — pass keygen config, call bp.Start(ctx)
 ├── internal/handler/
@@ -272,13 +272,35 @@ var _ billing.InstanceLimiter = (*Provider)(nil)
 
 ## Environment Variables
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `KEYGEN_API_URL` | No | `https://api.keygen.sh` | keygen.sh base URL; override for self-hosted instances |
-| `KEYGEN_ACCOUNT_ID` | When LICENSE_KEY set | — | keygen.sh account ID |
-| `KEYGEN_LICENSE_KEY` | No | — | License key; empty = Free mode (3 users max) |
+Only **one** runtime environment variable is needed:
 
-`local.New()` returns an error if `KEYGEN_LICENSE_KEY` is non-empty but `KEYGEN_ACCOUNT_ID` is empty (fast-fail at startup).
+| Variable | Required | Description |
+|---|---|---|
+| `KEYGEN_LICENSE_KEY` | No | License key; empty = Free mode (3 users max) |
+
+### Compile-time Constants (`-ldflags -X`)
+
+`KEYGEN_API_URL` and `KEYGEN_ACCOUNT_ID` are **baked into the binary at build time** and cannot be overridden at runtime. This prevents a malicious operator from redirecting the binary to a fake keygen.sh instance to bypass license validation.
+
+They are exposed as package-level variables in `billing/local/keygen.go`:
+
+```go
+// Set via: go build -ldflags "-X 'github.com/tabslate/server/billing/local.KeygenAPIURL=...'
+//                              -X 'github.com/tabslate/server/billing/local.KeygenAccountID=...'"
+var (
+    KeygenAPIURL    = "https://api.keygen.sh" // default; overridden at build time for self-hosted
+    KeygenAccountID = ""                       // MUST be set at build time; empty = keygen disabled
+)
+```
+
+`local.New()` returns an error at startup if `KEYGEN_LICENSE_KEY` is non-empty but `KeygenAccountID` is empty (prevents misconfigured builds from silently falling back to free tier instead of failing loudly).
+
+### Impact on `local.New()` Signature
+
+`keygenURL` and `accountID` parameters are removed. New signature:
+```go
+func New(licenseKey string, d *db.DB) (*Provider, error)
+```
 
 Inherited from existing config: `DATABASE_URL`, `JWT_SECRET`, `PORT`, `GIN_MODE`, mail/captcha vars.
 
