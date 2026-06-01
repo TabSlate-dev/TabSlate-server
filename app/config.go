@@ -23,8 +23,9 @@ type Config struct {
 	// GinMode sets the Gin framework mode ("debug", "release", "test").
 	GinMode string
 
-	// LicenseKey is the optional OSS License JWT. Leave empty for free-tier mode.
-	LicenseKey string
+	// KeygenLicenseKey is the optional keygen.sh license key. Leave empty for
+	// free-tier mode (3 users max).
+	KeygenLicenseKey string
 
 	// ── Prosopo Captcha ──────────────────────────────────────────────────────
 	// ProsopoSecret is the site secret for server-side verification.
@@ -131,7 +132,7 @@ func LoadConfig() *Config {
 		JWTSecret:   mustEnv("JWT_SECRET"),
 		Port:        envOr("PORT", "8080"),
 		GinMode:     os.Getenv("GIN_MODE"),
-		LicenseKey:  os.Getenv("LICENSE_KEY"),
+		KeygenLicenseKey: os.Getenv("KEYGEN_LICENSE_KEY"),
 
 		// Prosopo
 		ProsopoSecret:    os.Getenv("PROSOPO_SECRET"),

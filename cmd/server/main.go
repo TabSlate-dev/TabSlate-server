@@ -30,19 +30,20 @@ func main() {
 	}
 	log.Println("database ready")
 
-	// ── Billing provider ──────────────────────────────────────────────────────
-	// OSS edition: quota is derived from the installed License JWT (or free
-	// defaults when no LICENSE_KEY is set). No external calls are made.
-	bp, err := local.New(cfg.LicenseKey, nil /* no public key in dev */, database)
-	if err != nil {
-		log.Fatalf("billing provider: %v", err)
-	}
-
 	// ── Process lifetime context ──────────────────────────────────────────────
 	// Cancelled on SIGINT / SIGTERM so background goroutines (e.g. cleanup
 	// tasks) stop cleanly before the process exits.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// ── Billing provider ──────────────────────────────────────────────────────
+	// OSS edition: quota is derived from the configured keygen.sh license, or
+	// free-tier defaults when no license key is set.
+	bp, err := local.New(cfg.KeygenLicenseKey, database)
+	if err != nil {
+		log.Fatalf("billing provider: %v", err)
+	}
+	bp.Start(ctx)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	// Captcha verifier and mailer are created inside app.New() from Config.
