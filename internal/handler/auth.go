@@ -120,6 +120,13 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
+	if il, ok := h.billing.(billing.InstanceLimiter); ok {
+		if err := il.CheckRegistrationAllowed(ctx); err != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
@@ -209,9 +216,9 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	var user model.User
 	err := h.db.QueryRow(ctx,
-		`SELECT id, name, email, password_hash, is_verified, created_at, updated_at FROM users WHERE email = $1`,
+		`SELECT id, name, email, password_hash, is_verified, created_at, updated_at, suspended_at FROM users WHERE email = $1`,
 		req.Email,
-	).Scan(&user.ID, &user.Name, &user.Email, &user.PasswordHash, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt)
+	).Scan(&user.ID, &user.Name, &user.Email, &user.PasswordHash, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt, &user.SuspendedAt)
 	if err != nil {
 		h.recordLoginFailure(ctx, req.Email)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
@@ -226,6 +233,11 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	// Clear failures on success.
 	h.limiter.ResetCounter(ctx, "tabslate:auth:login_fail:"+req.Email)
+
+	if user.SuspendedAt != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "account suspended: instance user limit exceeded"})
+		return
+	}
 
 	// If the user hasn't verified their email yet, refresh the OTP so they
 	// always have a fresh code when they arrive at the verification screen.
