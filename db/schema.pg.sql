@@ -169,3 +169,18 @@ CREATE INDEX IF NOT EXISTS idx_tags_user             ON tags        (user_id);
 CREATE INDEX IF NOT EXISTS idx_tags_user_seq         ON tags        (user_id, seq);
 CREATE INDEX IF NOT EXISTS idx_groups_user_seq       ON groups      (user_id, seq);
 CREATE INDEX IF NOT EXISTS idx_group_tabs_group      ON group_tabs  (group_id);
+
+-- keygen.sh license: user suspension for limit enforcement
+ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_at BIGINT;
+
+-- keygen.sh license: machine fingerprint persistence
+CREATE TABLE IF NOT EXISTS server_config (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- OSS billing: seed unlimited plan so local.GetLimits always finds a row
+INSERT INTO subscription_capacity
+    (plan_code, plan_id, max_workspaces, max_bookmarks, max_collections, max_tags, max_saved_groups, trash_grace_days)
+VALUES ('unlimited', '', -1, -1, -1, -1, -1, -1)
+ON CONFLICT (plan_code) DO NOTHING;
