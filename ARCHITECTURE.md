@@ -10,7 +10,7 @@ cmd/server/main.go
         ├── internal/infra       Hub / Cache / Limiter 工厂（REDIS_URL 为空 = in-memory）
         ├── internal/handler/*   HTTP handlers（各实体 + 认证 + 同步 + SSE）
         ├── internal/middleware  Auth JWT + IP 速率限制
-        ├── billing.Provider     接口，OSS = local.Provider；Cloud = lago.Provider
+        ├── billing.Provider     接口，OSS = local.Provider；Cloud = meteroid.Provider
         └── gin.Engine           路由
 ```
 
