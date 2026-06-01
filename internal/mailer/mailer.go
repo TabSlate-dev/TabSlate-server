@@ -181,14 +181,23 @@ func (m *Mailer) Send(ctx context.Context, to, subject, htmlBody string) error {
 
 // SendOTP renders the OTP email template and sends it.
 func (m *Mailer) SendOTP(ctx context.Context, to, name, code, purpose, lang string) error {
-	copy := translations["verify"]["en"]
-	if byPurpose, ok := translations[purpose]; ok {
-		if byLang, ok := byPurpose["en"]; ok {
-			copy = byLang
-		}
-		if byLang, ok := byPurpose[lang]; ok {
-			copy = byLang
-		}
+	subject, body, err := m.renderOTP(name, code, purpose, lang)
+	if err != nil {
+		return err
+	}
+
+	return m.Send(ctx, to, subject, body)
+}
+
+func (m *Mailer) renderOTP(name, code, purpose, lang string) (string, string, error) {
+	byPurpose, ok := translations[purpose]
+	if !ok {
+		return "", "", fmt.Errorf("unknown otp purpose %q", purpose)
+	}
+
+	copy := byPurpose["en"]
+	if byLang, ok := byPurpose[lang]; ok {
+		copy = byLang
 	}
 
 	links := legalLinks["en"]
@@ -208,10 +217,10 @@ func (m *Mailer) SendOTP(ctx context.Context, to, name, code, purpose, lang stri
 		TermsText:   links.TermsText,
 		TermsURL:    links.TermsURL,
 	}); err != nil {
-		return fmt.Errorf("render otp template: %w", err)
+		return "", "", fmt.Errorf("render otp template: %w", err)
 	}
 
-	return m.Send(ctx, to, copy.Subject, body.String())
+	return copy.Subject, body.String(), nil
 }
 
 func (m *Mailer) sendSMTP(to, subject, htmlBody string) error {

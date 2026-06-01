@@ -2,7 +2,6 @@ package mailer
 
 import (
 	"bytes"
-	"context"
 	"html/template"
 	"strings"
 	"testing"
@@ -57,67 +56,74 @@ func TestRenderOTP_ContainsInjectedValues(t *testing.T) {
 	}
 }
 
-func TestSendOTP_AllPurposeLangCombinations(t *testing.T) {
+func TestRenderOTPLocalizedContent(t *testing.T) {
 	m := New(Config{})
 
 	cases := []struct {
-		purpose string
-		lang    string
-	}{
-		{purpose: "verify", lang: "en"},
-		{purpose: "verify", lang: "zh"},
-		{purpose: "reset", lang: "en"},
-		{purpose: "reset", lang: "zh"},
-	}
-
-	for _, tc := range cases {
-		if err := m.SendOTP(context.Background(), "test@example.com", "Bob", "654321", tc.purpose, tc.lang); err != nil {
-			t.Fatalf("SendOTP(%s, %s) returned error: %v", tc.purpose, tc.lang, err)
-		}
-	}
-}
-
-func TestOTPTranslationsAndLegalLinks(t *testing.T) {
-	tests := []struct {
+		name        string
 		purpose     string
 		lang        string
 		subject     string
+		heading     string
+		intro       string
+		note        string
+		greeting    string
 		privacyText string
 		privacyURL  string
 		termsText   string
 		termsURL    string
 	}{
 		{
+			name:        "verify-en",
 			purpose:     "verify",
 			lang:        "en",
 			subject:     "Verify your TabSlate email",
+			heading:     "Confirm your email address",
+			intro:       "Enter the code below to verify your email. It expires in 10 minutes.",
+			note:        "If you didn't create an account, you can safely ignore this email.",
+			greeting:    "Hi Bob,",
 			privacyText: "Privacy Policy",
 			privacyURL:  "https://tabslate.com/en/privacy-policy",
 			termsText:   "Terms",
 			termsURL:    "https://tabslate.com/en/terms",
 		},
 		{
+			name:        "verify-zh",
 			purpose:     "verify",
 			lang:        "zh",
 			subject:     "验证您的 TabSlate 邮箱",
+			heading:     "确认您的邮箱地址",
+			intro:       "请在下方输入验证码完成邮箱验证，验证码 10 分钟内有效。",
+			note:        "如果您没有注册账号，请忽略此邮件。",
+			greeting:    "Hi Bob,",
 			privacyText: "隐私政策",
 			privacyURL:  "https://tabslate.com/zh/privacy-policy",
 			termsText:   "服务条款",
 			termsURL:    "https://tabslate.com/zh/terms",
 		},
 		{
+			name:        "reset-en",
 			purpose:     "reset",
 			lang:        "en",
 			subject:     "Reset your TabSlate password",
+			heading:     "Reset your password",
+			intro:       "Enter the code below to reset your password. It expires in 10 minutes.",
+			note:        "If you didn't request a password reset, you can safely ignore this email.",
+			greeting:    "Hi Bob,",
 			privacyText: "Privacy Policy",
 			privacyURL:  "https://tabslate.com/en/privacy-policy",
 			termsText:   "Terms",
 			termsURL:    "https://tabslate.com/en/terms",
 		},
 		{
+			name:        "reset-zh",
 			purpose:     "reset",
 			lang:        "zh",
 			subject:     "重置您的 TabSlate 密码",
+			heading:     "重置密码",
+			intro:       "请在下方输入验证码以重置密码，验证码 10 分钟内有效。",
+			note:        "如果您没有申请重置密码，请忽略此邮件。",
+			greeting:    "Hi Bob,",
 			privacyText: "隐私政策",
 			privacyURL:  "https://tabslate.com/zh/privacy-policy",
 			termsText:   "服务条款",
@@ -125,28 +131,62 @@ func TestOTPTranslationsAndLegalLinks(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		stringsByLang, ok := translations[tc.purpose]
-		if !ok {
-			t.Fatalf("missing purpose %q", tc.purpose)
-		}
-		copy, ok := stringsByLang[tc.lang]
-		if !ok {
-			t.Fatalf("missing language %q for purpose %q", tc.lang, tc.purpose)
-		}
-		if copy.Subject != tc.subject {
-			t.Fatalf("subject mismatch for %s/%s: got %q want %q", tc.purpose, tc.lang, copy.Subject, tc.subject)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			subject, body, err := m.renderOTP("Bob", "654321", tc.purpose, tc.lang)
+			if err != nil {
+				t.Fatalf("renderOTP(%s, %s) returned error: %v", tc.purpose, tc.lang, err)
+			}
+			if subject != tc.subject {
+				t.Fatalf("subject mismatch: got %q want %q", subject, tc.subject)
+			}
+			for _, want := range []string{
+				tc.heading,
+				tc.greeting,
+				tc.intro,
+				"654321",
+				template.HTMLEscapeString(tc.note),
+				tc.privacyText,
+				tc.privacyURL,
+				tc.termsText,
+				tc.termsURL,
+			} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("rendered body missing %q", want)
+				}
+			}
+		})
+	}
+}
 
-		links, ok := legalLinks[tc.lang]
-		if !ok {
-			t.Fatalf("missing legal links for %q", tc.lang)
+func TestRenderOTPFallsBackToEnglishForUnknownLang(t *testing.T) {
+	m := New(Config{})
+
+	subject, body, err := m.renderOTP("Bob", "654321", "verify", "fr")
+	if err != nil {
+		t.Fatalf("renderOTP returned error: %v", err)
+	}
+	if subject != "Verify your TabSlate email" {
+		t.Fatalf("subject mismatch: got %q", subject)
+	}
+	for _, want := range []string{
+		"Confirm your email address",
+		"Enter the code below to verify your email. It expires in 10 minutes.",
+		"Privacy Policy",
+		"https://tabslate.com/en/privacy-policy",
+		"Terms",
+		"https://tabslate.com/en/terms",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("rendered body missing %q", want)
 		}
-		if links.PrivacyText != tc.privacyText || links.PrivacyURL != tc.privacyURL {
-			t.Fatalf("privacy link mismatch for %s", tc.lang)
-		}
-		if links.TermsText != tc.termsText || links.TermsURL != tc.termsURL {
-			t.Fatalf("terms link mismatch for %s", tc.lang)
-		}
+	}
+}
+
+func TestRenderOTPRejectsUnknownPurpose(t *testing.T) {
+	m := New(Config{})
+
+	if _, _, err := m.renderOTP("Bob", "654321", "magic", "en"); err == nil {
+		t.Fatal("renderOTP returned nil error for unknown purpose")
 	}
 }
