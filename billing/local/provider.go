@@ -139,6 +139,11 @@ func (p *Provider) enforceUserLimit(ctx context.Context) {
 		return
 	}
 
+	// Read the limit before querying users so both values come from the same
+	// point in time, avoiding a TOCTOU where a license refresh between the two
+	// calls could change the effective limit mid-enforcement.
+	max := p.cache.maxUsers()
+
 	rows, err := p.db.Query(ctx, `
 		SELECT id FROM users WHERE is_verified = true ORDER BY created_at ASC
 	`)
@@ -161,8 +166,6 @@ func (p *Provider) enforceUserLimit(ctx context.Context) {
 		log.Printf("billing/local: enforceUserLimit rows: %v", err)
 		return
 	}
-
-	max := p.cache.maxUsers()
 	now := time.Now().Unix()
 	for i, id := range ids {
 		if i < max {

@@ -33,13 +33,24 @@ func TestNew_freeTier(t *testing.T) {
 	}
 }
 
-func TestCheckRegistrationAllowed_freeTierAtLimit(t *testing.T) {
+func TestCheckRegistrationAllowed_nilDB_allowsRegistration(t *testing.T) {
 	p := &Provider{
+		db:    nil,
 		cache: newLicenseCache(nil, ""),
 	}
-	if p.cache.maxUsers() != defaultFreeUsers {
-		t.Errorf("expected free limit %d", defaultFreeUsers)
+	// With nil DB we cannot count users, so registration is allowed (graceful degradation).
+	if err := p.CheckRegistrationAllowed(context.Background()); err != nil {
+		t.Fatalf("nil DB should allow registration, got: %v", err)
 	}
+}
+
+func TestEnforceUserLimit_nilDB_isNoop(t *testing.T) {
+	p := &Provider{
+		db:    nil,
+		cache: newLicenseCache(nil, ""),
+	}
+	// Must not panic with nil db.
+	p.enforceUserLimit(context.Background())
 }
 
 func TestGetSubscription_freeTier(t *testing.T) {

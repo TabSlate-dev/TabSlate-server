@@ -572,9 +572,14 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 
 	var user model.User
 	if err := h.db.QueryRow(ctx,
-		`SELECT id, name, email, is_verified, created_at, updated_at FROM users WHERE id = $1`, userID,
-	).Scan(&user.ID, &user.Name, &user.Email, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt); err != nil {
+		`SELECT id, name, email, is_verified, created_at, updated_at, suspended_at FROM users WHERE id = $1`, userID,
+	).Scan(&user.ID, &user.Name, &user.Email, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt, &user.SuspendedAt); err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired refresh token"})
+		return
+	}
+
+	if user.SuspendedAt != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "account suspended: instance user limit exceeded"})
 		return
 	}
 
