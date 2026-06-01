@@ -33,7 +33,7 @@ func New(licenseKey string, d *db.DB) (*Provider, error) {
 	var cache *licenseCache
 	if licenseKey != "" {
 		if KeygenAccountID == "" {
-			return nil, fmt.Errorf("billing/local: KEYGEN_ACCOUNT_ID must be set at build time when a license key is provided")
+			return nil, fmt.Errorf("billing/local: keygen account ID must be set at build time when a license key is provided")
 		}
 		cache = newLicenseCache(newKeygenClient(KeygenAPIURL, KeygenAccountID, licenseKey), "")
 	} else {
