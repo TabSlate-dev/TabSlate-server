@@ -23,6 +23,7 @@ TabSlate-Cloud (private repo, uses Meteroid billing) is **not affected** by this
 5. License limits are fully dynamic from keygen.sh metadata; Free tier = 3 users hardcoded (no license key required)
 6. Periodic active refresh (background goroutine, default 1h), analogous to Cloud's `capacityStore`
 7. When user count exceeds license limit (e.g. after DB-level INSERT), users beyond the limit are automatically suspended on the next license refresh cycle; their sessions are invalidated and login is blocked until the license limit is restored
+8. One license key may only be activated on one machine at a time; attempting to start a second instance with the same license key is a fatal startup error
 
 ---
 
@@ -36,6 +37,7 @@ TabSlate-Cloud (private repo, uses Meteroid billing) is **not affected** by this
 | Recompiling binary to remove license check | Not a realistic threat; TabSlate-server is non-open-source (publicly viewable but not freely modifiable/redistributable) |
 | keygen.sh unavailability | Cold start: fallback to Free limits (3 users). Runtime: retain last successful cache value, log warning |
 | License expiry or revocation | Downgrade to Free limits (3 users); existing users within Free limit are unaffected; excess users suspended on next refresh |
+| Same license key used on a second machine | Startup fails with fatal error: "license already activated on another machine" |
 
 ---
 
@@ -63,7 +65,7 @@ TabSlate-server/
 ├── internal/handler/
 │   └── auth.go              MODIFIED  — Register: add InstanceLimiter check; Login: add suspended check
 └── db/
-    └── schema.pg.sql        MODIFIED  — users table: add suspended_at BIGINT column
+    └── schema.pg.sql        MODIFIED  — users: add suspended_at; new server_config table
 ```
 
 **TabSlate-Cloud: no changes.**
@@ -103,15 +105,33 @@ POST /auth/register
    count <  maxUsers  →  return nil
 ```
 
+### Machine Activation (Startup, Synchronous)
+
+Before the background goroutine starts, `local.Provider.Start(ctx)` runs machine activation synchronously:
+
+```
+1. Load fingerprint from server_config WHERE key = 'license_machine_fingerprint'
+   └─ not found → generate UUIDv4, INSERT into server_config
+
+2. ActivateMachine(fingerprint)
+   ├─ 201 → first activation, continue
+   ├─ 409 → already activated (same machine restart), continue
+   └─ 422 → FATAL: log.Fatalf("license already activated on another machine;
+                               deactivate it from the keygen.sh dashboard first")
+```
+
+This runs only when `KEYGEN_LICENSE_KEY` is set. Free mode skips it entirely.
+
 ### License Enforcement (Background Goroutine)
 
-`local.Provider.Start(ctx)` launches a goroutine that runs on startup and every `syncInterval` (default 1h):
+`local.Provider.Start(ctx)` then launches a goroutine that runs on startup and every `syncInterval` (default 1h):
 
 ```
 1. licenseCache.refresh(ctx)
-   └─ GET /v1/accounts/{accountID}/licenses/{licenseKey}
-      ├─ success → update cache (maxUsers, status, expiry)
-      └─ failure → retain last value, log warning
+   └─ FetchLicense + ValidateMachine(fingerprint)
+      ├─ both succeed → update cache (maxUsers, status, expiry)
+      ├─ machine deactivated → cache status = SUSPENDED (treat as revoked), log warning
+      └─ network failure → retain last value, log warning
 
 2. enforceUserLimit(ctx)
    ├─ SELECT id, created_at FROM users
@@ -152,7 +172,9 @@ type InstanceLimiter interface {
 
 ## keygen.sh Client (`billing/local/keygen.go`)
 
-Single responsibility: fetch and parse license data from keygen.sh REST API.
+Single responsibility: keygen.sh REST API calls. Three methods:
+
+### FetchLicense
 
 ```
 GET /v1/accounts/{accountID}/licenses/{licenseKey}
@@ -165,7 +187,36 @@ Response parsed fields:
     "max_users"                   → int (0 = not set → treated as Free limit)
 ```
 
-Error format: `fmt.Errorf("keygen fetch: %w", err)`.  
+### ActivateMachine
+
+Called once on startup (idempotent — 409 means already activated on this fingerprint).
+
+```
+POST /v1/accounts/{accountID}/machines
+Authorization: License {licenseKey}
+Body: { "data": { "type": "machines",
+                  "attributes": { "fingerprint": "<uuid>", "name": "<hostname>" },
+                  "relationships": { "license": { "data": { "type": "licenses",
+                                                             "id": "<licenseKey>" } } } } }
+
+201 Created        → first activation, success
+409 Conflict       → already activated for this fingerprint → OK (same machine restart)
+422 Unprocessable  → machine limit exceeded (another machine holds this license) → fatal
+```
+
+### ValidateMachine
+
+Called on each periodic refresh to confirm the machine is still activated.
+
+```
+GET /v1/accounts/{accountID}/machines?fingerprint={fingerprint}
+Authorization: License {licenseKey}
+
+data[] empty       → machine was deactivated via keygen.sh dashboard → treat as revoked
+data[0] present    → still active
+```
+
+Error format: `fmt.Errorf("keygen %s: %w", operation, err)`.  
 Never log response headers (Authorization header contains license key).
 
 ---
@@ -174,10 +225,11 @@ Never log response headers (Authorization header contains license key).
 
 ```go
 type licenseCache struct {
-    mu        sync.RWMutex
-    data      LicenseData
-    fetchedAt time.Time
-    client    *keygenClient  // nil = free tier, no keygen.sh calls
+    mu          sync.RWMutex
+    data        LicenseData
+    fetchedAt   time.Time
+    client      *keygenClient  // nil = free tier, no keygen.sh calls
+    fingerprint string         // machine UUID loaded from DB at construction
 }
 
 type LicenseData struct {
@@ -188,8 +240,8 @@ type LicenseData struct {
 ```
 
 - `maxUsers()`: returns `data.MaxUsers` if status is ACTIVE and not expired; otherwise 3 (Free fallback)
-- `refresh(ctx)`: calls keygen.sh, updates `data` and `fetchedAt` under write lock; on error retains previous values
-- `Start(ctx, interval)`: initial sync (synchronous), then background ticker
+- `refresh(ctx)`: calls `FetchLicense` + `ValidateMachine`; on error retains previous values, logs warning
+- `Start(ctx, interval)`: performs initial machine activation + sync (synchronous, fatal on activation failure), then background ticker calling `refresh`
 
 ---
 
@@ -226,17 +278,31 @@ var _ billing.InstanceLimiter = (*Provider)(nil)
 | `KEYGEN_ACCOUNT_ID` | When LICENSE_KEY set | — | keygen.sh account ID |
 | `KEYGEN_LICENSE_KEY` | No | — | License key; empty = Free mode (3 users max) |
 
+`local.New()` returns an error if `KEYGEN_LICENSE_KEY` is non-empty but `KEYGEN_ACCOUNT_ID` is empty (fast-fail at startup).
+
 Inherited from existing config: `DATABASE_URL`, `JWT_SECRET`, `PORT`, `GIN_MODE`, mail/captcha vars.
 
 ---
 
-## Schema Change
+## Schema Changes
 
 ```sql
+-- For user suspension enforcement
 ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_at BIGINT;
+
+-- For machine fingerprint persistence across restarts
+CREATE TABLE IF NOT EXISTS server_config (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ```
 
-Applied via `db.Migrate()` (idempotent). Cloud's schema already includes this column after this migration runs (Cloud calls the same `db.Migrate`).
+Both applied via `db.Migrate()` (idempotent). Cloud's schema includes these after migration runs (Cloud calls the same `db.Migrate`). The `server_config` table is unused by Cloud.
+
+The machine fingerprint is stored as:
+```
+server_config WHERE key = 'license_machine_fingerprint'  →  value = '<uuidv4>'
+```
 
 ---
 
@@ -250,6 +316,7 @@ Applied via `db.Migrate()` (idempotent). Cloud's schema already includes this co
 | License expired or revoked | Downgrade to Free limit (3 users); existing users within limit unaffected |
 | DB direct INSERT beyond limit | Detected on next refresh (≤1h); excess users suspended, sessions invalidated |
 | License upgraded (maxUsers increases) | Suspended users restored in `created_at ASC` order on next refresh |
+| Machine deactivated via keygen.sh dashboard | Periodic refresh detects empty machines list → treat as revoked (Free limits, excess users suspended); re-activation required |
 
 ---
 
@@ -260,3 +327,12 @@ Applied via `db.Migrate()` (idempotent). Cloud's schema already includes this co
 - `subscription_capacity` table seeding (still seeds "unlimited" row for OSS)
 - TabSlate-Cloud (`meteroid.Provider`, `cmd/server/main.go` in TabSlate-Cloud repo)
 - All resource limit enforcement in handlers (unchanged, still unlimited for OSS)
+
+## Cleanup: Removed Code
+
+The following are deleted as part of this migration:
+
+- `billing/local/license.go` — entire file (JWT parsing: `ParseAndVerify`, `licenseClaims`, `parseRSAPublicKey`, `License` struct)
+- `billing/local/provider.go` — `*License` field on `Provider`, `unlimitedLimits()` helper, `seedCapacity()` (replaced by DB seeding in `db.Migrate`)
+- `app/config.go` — `LicenseKey string` field
+- `go.mod` / `go.sum` — `github.com/golang-jwt/jwt/v5` dependency (if no other consumer remains)
