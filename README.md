@@ -1,49 +1,19 @@
 # TabSlate Server
 
-Go backend for the TabSlate self-hosted (OSS) edition. Ships as a compiled binary and Docker image; source is not redistributable.
+Go backend for the TabSlate Chrome extension. Released under **AGPL-3.0**.
 
 ---
 
 ## Building
 
-### Standard build
-
 ```bash
 go build -o tabslate-server ./cmd/server
 ```
 
-### Production build (with keygen.sh license enforcement)
-
-`KEYGEN_API_URL` and `KEYGEN_ACCOUNT_ID` are baked into the binary at compile time to prevent runtime redirection to a fake license endpoint.
+Docker:
 
 ```bash
-go build \
-  -ldflags "-X 'github.com/tabslate/server/billing/local.KeygenAPIURL=https://api.keygen.sh' \
-            -X 'github.com/tabslate/server/billing/local.KeygenAccountID=<ACCOUNT_ID>'" \
-  -o tabslate-server \
-  ./cmd/server
-```
-
-Replace `<ACCOUNT_ID>` with the TabSlate keygen.sh account ID.
-
-### Docker build
-
-```bash
-docker build \
-  --build-arg KEYGEN_API_URL=https://api.keygen.sh \
-  --build-arg KEYGEN_ACCOUNT_ID=<ACCOUNT_ID> \
-  -t tabslate-server .
-```
-
-Ensure the `Dockerfile` passes these as `-ldflags` to `go build`:
-
-```dockerfile
-ARG KEYGEN_API_URL
-ARG KEYGEN_ACCOUNT_ID
-RUN go build \
-      -ldflags "-X 'github.com/tabslate/server/billing/local.KeygenAPIURL=${KEYGEN_API_URL}' \
-                -X 'github.com/tabslate/server/billing/local.KeygenAccountID=${KEYGEN_ACCOUNT_ID}'" \
-      -o /tabslate-server ./cmd/server
+docker build -t tabslate-server .
 ```
 
 ---
@@ -56,7 +26,7 @@ RUN go build \
 | `JWT_SECRET` | ✅ | HMAC secret for access tokens |
 | `PORT` | | HTTP port (default `8080`) |
 | `GIN_MODE` | | Gin mode: `release` / `debug` (default `debug`) |
-| `KEYGEN_LICENSE_KEY` | | keygen.sh license key; omit for Free tier (3 users max) |
+| `ALLOW_REGISTRATION` | | Set to `false` to disable new user registration (default `true`) |
 | `PROSOPO_SECRET` | | Captcha secret; omit to disable captcha |
 | `MAIL_PROVIDER` | | `smtp` / `resend` / `ses`; omit to auto-verify all registrations |
 
@@ -66,4 +36,11 @@ See `.env.example` for the full list including SMTP, Resend, SES, and rate-limit
 
 ## License
 
-TabSlate Server is proprietary software. Redistribution and modification are not permitted. See LICENSE for details.
+TabSlate Server is free software: you can redistribute it and/or modify it
+under the terms of the **GNU Affero General Public License** as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+You may **not** use this software to operate a paid commercial synchronization
+service for third parties without a separate commercial license from TabSlate.
+See LICENSE for details.
