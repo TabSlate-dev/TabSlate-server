@@ -59,5 +59,3 @@ type UserSyncer interface {
 	// login/profile fetch.
 	EnsureUserSynced(ctx context.Context, user UserInfo) error
 }
-
-

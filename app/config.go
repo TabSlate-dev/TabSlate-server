@@ -129,10 +129,10 @@ type Config struct {
 // required variable that is missing.
 func LoadConfig() *Config {
 	return &Config{
-		DatabaseURL: mustEnv("DATABASE_URL"),
-		JWTSecret:   mustEnv("JWT_SECRET"),
-		Port:        envOr("PORT", "8080"),
-		GinMode:          os.Getenv("GIN_MODE"),
+		DatabaseURL:       mustEnv("DATABASE_URL"),
+		JWTSecret:         mustEnv("JWT_SECRET"),
+		Port:              envOr("PORT", "8080"),
+		GinMode:           os.Getenv("GIN_MODE"),
 		AllowRegistration: os.Getenv("ALLOW_REGISTRATION") != "false",
 
 		// Prosopo
@@ -141,14 +141,14 @@ func LoadConfig() *Config {
 		ProsopoBundleURL: envOr("PROSOPO_BUNDLE_URL", "https://js.prosopo.io/js/procaptcha.bundle.js"),
 
 		// Email
-		MailProvider:  os.Getenv("MAIL_PROVIDER"),
-		SMTPHost:      os.Getenv("SMTP_HOST"),
-		SMTPPort:      envOr("SMTP_PORT", "587"),
-		SMTPUser:      os.Getenv("SMTP_USER"),
-		SMTPPassword:  os.Getenv("SMTP_PASSWORD"),
-		SMTPFrom:      os.Getenv("SMTP_FROM"),
-		ResendAPIKey:  os.Getenv("RESEND_API_KEY"),
-		ResendFrom:    os.Getenv("RESEND_FROM"),
+		MailProvider: os.Getenv("MAIL_PROVIDER"),
+		SMTPHost:     os.Getenv("SMTP_HOST"),
+		SMTPPort:     envOr("SMTP_PORT", "587"),
+		SMTPUser:     os.Getenv("SMTP_USER"),
+		SMTPPassword: os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:     os.Getenv("SMTP_FROM"),
+		ResendAPIKey: os.Getenv("RESEND_API_KEY"),
+		ResendFrom:   os.Getenv("RESEND_FROM"),
 
 		SESAccessKeyID: os.Getenv("SES_ACCESS_KEY_ID"),
 		SESSecretKey:   os.Getenv("SES_SECRET_KEY"),
