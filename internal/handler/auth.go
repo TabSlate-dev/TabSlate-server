@@ -49,6 +49,8 @@ type AuthHandler struct {
 	limiter ratelimit.Limiter
 	cache   store.Cache
 
+	registrationOpen bool
+
 	registerCaptchaThreshold int
 	registerCaptchaWindow    time.Duration
 
@@ -68,6 +70,7 @@ func NewAuthHandler(
 	registerWindow time.Duration,
 	otpThreshold int,
 	otpWindow time.Duration,
+	registrationOpen bool,
 ) *AuthHandler {
 	return &AuthHandler{
 		db:                       d,
@@ -77,6 +80,7 @@ func NewAuthHandler(
 		mailer:                   m,
 		limiter:                  l,
 		cache:                    cache,
+		registrationOpen:         registrationOpen,
 		registerCaptchaThreshold: registerThreshold,
 		registerCaptchaWindow:    registerWindow,
 		otpCaptchaThreshold:      otpThreshold,
@@ -86,6 +90,12 @@ func NewAuthHandler(
 
 // POST /auth/register
 func (h *AuthHandler) Register(c *gin.Context) {
+	// ── Step 0: Registration gate ─────────────────────────────────────────────
+	if !h.registrationOpen {
+		c.JSON(http.StatusForbidden, gin.H{"error": "registration is disabled on this instance"})
+		return
+	}
+
 	var req model.RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -118,13 +128,6 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	if count > 0 {
 		c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
 		return
-	}
-
-	if il, ok := h.billing.(billing.InstanceLimiter); ok {
-		if err := il.CheckRegistrationAllowed(ctx); err != nil {
-			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
-			return
-		}
 	}
 
 	hash, err := auth.HashPassword(req.Password)

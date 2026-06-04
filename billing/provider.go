@@ -60,12 +60,4 @@ type UserSyncer interface {
 	EnsureUserSynced(ctx context.Context, user UserInfo) error
 }
 
-// InstanceLimiter is implemented by providers that enforce instance-level user
-// count limits. OSS local.Provider implements this; Cloud meteroid.Provider
-// does not. auth.Register uses a type assertion — this is NOT part of
-// billing.Provider.
-type InstanceLimiter interface {
-	// CheckRegistrationAllowed returns an error if registering a new user would
-	// exceed the instance's licensed user count.
-	CheckRegistrationAllowed(ctx context.Context) error
-}
+

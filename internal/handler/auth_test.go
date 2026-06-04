@@ -1,6 +1,14 @@
 package handler
 
-import "testing"
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+)
 
 func TestParseLang(t *testing.T) {
 	tests := []struct {
@@ -23,5 +31,28 @@ func TestParseLang(t *testing.T) {
 				t.Fatalf("parseLang(%q) = %q, want %q", tc.acceptLang, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRegister_registrationClosed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	body := `{"email":"test@example.com","password":"test123456","name":"Test"}`
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/register", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h := &AuthHandler{registrationOpen: false}
+	h.Register(c)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["error"] != "registration is disabled on this instance" {
+		t.Errorf("unexpected error: %q", resp["error"])
 	}
 }

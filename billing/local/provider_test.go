@@ -8,71 +8,38 @@ import (
 )
 
 var _ billing.Provider = (*Provider)(nil)
-var _ billing.InstanceLimiter = (*Provider)(nil)
 
-func TestNew_missingAccountID(t *testing.T) {
-	original := KeygenAccountID
-	KeygenAccountID = ""
-	t.Cleanup(func() {
-		KeygenAccountID = original
-	})
-
-	_, err := New("some-license-key", nil)
-	if err == nil {
-		t.Fatal("expected error when licenseKey set but KeygenAccountID empty")
+func TestNew_returnsProvider(t *testing.T) {
+	p := New(nil)
+	if p == nil {
+		t.Fatal("New(nil) should return a non-nil Provider")
 	}
 }
 
-func TestNew_freeTier(t *testing.T) {
-	p, err := New("", nil)
-	if err != nil {
-		t.Fatalf("free tier New() should not error: %v", err)
-	}
-	if p.cache.client != nil {
-		t.Error("free tier should have nil keygen client")
-	}
-}
-
-func TestCheckRegistrationAllowed_nilDB_allowsRegistration(t *testing.T) {
-	p := &Provider{
-		db:    nil,
-		cache: newLicenseCache(nil, ""),
-	}
-	// With nil DB we cannot count users, so registration is allowed (graceful degradation).
-	if err := p.CheckRegistrationAllowed(context.Background()); err != nil {
-		t.Fatalf("nil DB should allow registration, got: %v", err)
-	}
-}
-
-func TestEnforceUserLimit_nilDB_isNoop(t *testing.T) {
-	p := &Provider{
-		db:    nil,
-		cache: newLicenseCache(nil, ""),
-	}
-	// Must not panic with nil db.
-	p.enforceUserLimit(context.Background())
-}
-
-func TestGetSubscription_freeTier(t *testing.T) {
-	p := &Provider{cache: newLicenseCache(nil, "")}
-	sub, err := p.GetSubscription(context.Background(), "any-user")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if sub.Plan != billing.PlanFree {
-		t.Errorf("plan = %q, want free", sub.Plan)
-	}
-}
-
-func TestGetSubscription_activeLicense(t *testing.T) {
-	c := newLicenseCache(&keygenClient{}, "fp")
-	c.data = keygenLicense{Status: "ACTIVE", MaxUsers: 10}
-	p := &Provider{cache: c}
+func TestGetSubscription_alwaysPro(t *testing.T) {
+	p := New(nil)
 	sub, err := p.GetSubscription(context.Background(), "any-user")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if sub.Plan != billing.PlanPro {
-		t.Errorf("plan = %q, want pro", sub.Plan)
+		t.Errorf("plan = %q, want %q", sub.Plan, billing.PlanPro)
+	}
+	if sub.Status != "active" {
+		t.Errorf("status = %q, want active", sub.Status)
+	}
+}
+
+func TestGetLimits_nilDB_returnsUnlimited(t *testing.T) {
+	p := New(nil)
+	limits, err := p.GetLimits(context.Background(), "any-user")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if limits.MaxBookmarks != -1 {
+		t.Errorf("MaxBookmarks = %d, want -1 (unlimited)", limits.MaxBookmarks)
+	}
+	if limits.MaxWorkspaces != -1 {
+		t.Errorf("MaxWorkspaces = %d, want -1 (unlimited)", limits.MaxWorkspaces)
 	}
 }

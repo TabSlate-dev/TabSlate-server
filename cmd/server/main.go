@@ -37,13 +37,9 @@ func main() {
 	defer stop()
 
 	// ── Billing provider ──────────────────────────────────────────────────────
-	// OSS edition: quota is derived from the configured keygen.sh license, or
-	// free-tier defaults when no license key is set.
-	bp, err := local.New(cfg.KeygenLicenseKey, database)
-	if err != nil {
-		log.Fatalf("billing provider: %v", err)
-	}
-	bp.Start(ctx)
+	// OSS edition: unlimited users, all features unlocked. Registration gating
+	// is controlled by ALLOW_REGISTRATION env var (handled in AuthHandler).
+	bp := local.New(database)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	// Captcha verifier and mailer are created inside app.New() from Config.
