@@ -10,7 +10,7 @@ cmd/server/main.go
         ├── internal/infra       Hub / Cache / Limiter 工厂（REDIS_URL 为空 = in-memory）
         ├── internal/handler/*   HTTP handlers（各实体 + 认证 + 同步 + SSE）
         ├── internal/middleware  Auth JWT + IP 速率限制
-        ├── billing.Provider     接口，OSS = local.Provider；Cloud = meteroid.Provider
+        ├── billing.Provider     接口，OSS = local.Provider；Cloud = unibee.Provider
         └── gin.Engine           路由
 ```
 
@@ -231,7 +231,7 @@ currentSeq(ctx, d *db.DB, userID) (int64, error)
 | `groups` | id, user_id, workspace_id, seq, deleted_at, **is_deleted INT** | `is_deleted`: 0/1/2 三态；软删除保留行 |
 | `group_tabs` | id, group_id FK→groups, title, url, favicon, position | 组内 tab；ON DELETE CASCADE；无 seq，整体快照替换 |
 | `refresh_tokens` | token_hash, user_id, expires_at | SHA-256 哈希存储，使用后轮换 |
-| `subscription_capacity` | plan_code PK, plan_id, max_workspaces, max_bookmarks, max_collections, max_tags, max_saved_groups, trash_grace_days, updated_at | 套餐配额；OSS 写 `unlimited`（全 -1）；Cloud 由 Meteroid 同步写入；-1 = 不限制 |
+| `subscription_capacity` | plan_code PK, plan_id, max_workspaces, max_bookmarks, max_collections, max_tags, max_saved_groups, trash_grace_days, updated_at | 套餐配额；OSS 写 `unlimited`（全 -1）；Cloud 由 Unibee 同步写入；-1 = 不限制 |
 
 **Delta-pull 索引**（`schema.pg.sql` 末尾）：
 ```sql
@@ -279,7 +279,7 @@ cmd/server/main.go
       └── handler.New*(db, infra, search, ...)  # 各 handler 注入 Hub/Cache/Limiter
 ```
 
-Cloud 仓库只需将 `local.New(...)` 替换为 `meteroid.New(...)`，调用 `bp.Start(ctx)` 启动容量同步 goroutine，并设置 `REDIS_URL` 即可实现水平扩展。
+Cloud 仓库只需将 `local.New(...)` 替换为 `unibee.New(...)`，调用 `bp.Start(ctx)` 启动容量同步 goroutine，并设置 `REDIS_URL` 即可实现水平扩展。
 
 ## 认证机制
 
