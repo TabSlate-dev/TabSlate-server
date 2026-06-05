@@ -34,7 +34,7 @@ Four new env vars, all `SES_`-namespaced:
 | `SES_ACCESS_KEY_ID` | ✅ | AWS access key ID |
 | `SES_SECRET_KEY` | ✅ | AWS secret access key |
 | `SES_REGION` | ✅ | AWS region, e.g. `us-east-1` |
-| `SES_FROM` | ✅ | Sender address, e.g. `TabSlate <noreply@tabslate.app>` |
+| `SES_FROM` | ✅ | Sender address, e.g. `TabSlate <noreply@tabslate.com>` |
 
 No startup validation — missing credentials surface as a send-time error, consistent with the existing SMTP and Resend behavior.
 

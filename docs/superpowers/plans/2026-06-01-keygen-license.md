@@ -995,7 +995,7 @@ func (p *Provider) GetSubscription(_ context.Context, _ string) (*billing.Subscr
 func (p *Provider) GetCheckoutURL(_ context.Context, _, _ string) (string, error) {
 	return "", fmt.Errorf(
 		"online checkout is not available in the OSS edition; " +
-			"visit https://tabslate.app/pricing to purchase a license",
+			"visit https://tabslate.com/pricing to purchase a license",
 	)
 }
 

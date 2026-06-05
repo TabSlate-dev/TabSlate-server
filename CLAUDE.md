@@ -10,7 +10,7 @@ TabSlate 由三个仓库组成：
 |---|---|---|
 | **`TabSlate`** | 公开，AGPL | Chrome 扩展前端，TypeScript + React + WXT |
 | **`TabSlate-server`**（本仓库） | 公开，AGPL-3.0 | Go 后端，AGPL 开源，用户数无上限，可自托管；禁止未经授权将本后端用于商业收费服务 |
-| **`TabSlate-cloud`** | 私有 | Go 后端 Cloud 版，以本仓库为 Go module 依赖，注入 Meteroid 计费 |
+| **`TabSlate-cloud`** | 私有 | Go 后端 Cloud 版，以本仓库为 Go module 依赖，注入 Polar.sh 计费 |
 
 `TabSlate-cloud` 通过 `require github.com/tabslate/server` + `replace` 指令引用本仓库，仅需替换 `billing.Provider` 实现即可获得完整后端能力。Cloud 仓库可直接导入本仓库的 `billing/`、`db/`、`app/` 公开包，`internal/` 包对外部模块不可见（Go 模块系统强制）。
 
@@ -20,7 +20,7 @@ TabSlate 由三个仓库组成：
 
 TabSlate-server 是 TabSlate Chrome 扩展的后端，Go 编写：
 - **OSS 版**（本仓库）：AGPL-3.0 开源，用户数无上限，支持自托管；禁止使用本后端提供收费同步服务（无 TabSlate 商业授权）
-- **Cloud 版**（私有仓库 `TabSlate-cloud`）：导入本仓库作为依赖，注入 `meteroid.Provider` 实现在线计费
+- **Cloud 版**（私有仓库 `TabSlate-cloud`）：导入本仓库作为依赖，注入 `polar.Provider` 实现在线计费
 
 详细架构说明见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
@@ -91,7 +91,7 @@ cmd/server/main.go
   → handler.NewAuthHandler(db, secret, provider, captcha, mailer, ..., registrationOpen)
 ```
 
-`app.New()` 内部根据 `Config` 的 Prosopo / Mail 字段自动创建 `captcha.Verifier` 和 `mailer.Mailer`，外部调用方无需导入 `internal/` 包。Cloud 仓库的 `main.go` 只需将 `local.New(...)` 替换为 `meteroid.New(...)`，其余不变。`RegisterWebhook()` 供 Cloud 额外挂载 webhook 路由。
+`app.New()` 内部根据 `Config` 的 Prosopo / Mail 字段自动创建 `captcha.Verifier` 和 `mailer.Mailer`，外部调用方无需导入 `internal/` 包。Cloud 仓库的 `main.go` 只需将 `local.New(...)` 替换为 `polar.New(...)`，其余不变。`RegisterWebhook()` 供 Cloud 额外挂载 webhook 路由。
 
 ### 数据库
 
@@ -228,8 +228,8 @@ h.db.QueryRow(h.db.Rebind(`SELECT ...`), args...)
 
 ### 接口设计
 
-新的 `billing.Provider` 实现（如 Cloud 的 `meteroid.Provider`）必须满足以下约定：
-- `OnUserCreated` 应设计为幂等（重复调用不产生副作用）。Cloud 的 `meteroid.Provider` 通过两层 guard 实现：① 进程内 `sync.Map` 防止同一 userID 并发重入；② `users.billing_synced_at` 字段（成功后写入）防止跨进程/重启重复执行。
+新的 `billing.Provider` 实现（如 Cloud 的 `polar.Provider`）必须满足以下约定：
+- `OnUserCreated` 应设计为幂等（重复调用不产生副作用）。Cloud 的 `polar.Provider` 通过两层 guard 实现：① 进程内 `sync.Map` 防止同一 userID 并发重入；② `users.billing_synced_at` 字段（成功后写入）防止跨进程/重启重复执行。
 - 实现类型应在包级别通过编译期断言验证接口：`var _ billing.Provider = (*Provider)(nil)`
 - `GetLimits` 的实现应带本地缓存，避免每次请求都打外部 API
 
@@ -277,7 +277,7 @@ h.db.QueryRowContext(ctx, h.db.Rebind(`SELECT * FROM users WHERE email = ?`), em
 
 ### Webhook（Cloud）
 
-- Cloud 版当前使用 Meteroid 计费，无 Webhook（缓存失效依赖 TTL）
+- Cloud 版当前使用 Polar.sh 计费，可能配置有 Webhook（通过 Stripe 或 Polar 处理）。
 - 若未来接入支付 Webhook（Stripe 等），须验证签名头后再读取 payload body，避免大量无效请求消耗内存
 
 ### CORS
@@ -288,7 +288,7 @@ h.db.QueryRowContext(ctx, h.db.Rebind(`SELECT * FROM users WHERE email = ?`), em
 
 ## 注意事项
 
-- **schema 位置**：schema 文件在 `db/schema.pg.sql`（PostgreSQL，`//go:embed` 引用）。所有列已合并到 `CREATE TABLE` 定义，新增列通过 `ALTER TABLE … ADD COLUMN IF NOT EXISTS` 追加以兼容已存在的表（幂等）。原有限流表（`login_failures`、`otp_ip_requests`、`register_ip_requests`、`sse_tokens`）不存在于 schema，对应状态由 `internal/ratelimit` 和 `internal/store` 管理（in-memory 或 Redis）。`groups` / `group_tabs` 两张表：`groups` 含 `seq`/`deleted_at`/`is_deleted`/`workspace_id` 同步字段；`group_tabs` 以 `group_id REFERENCES groups(id) ON DELETE CASCADE` 外键关联，tab 列表无 seq，整体快照替换。`subscription_capacity` 表：以 `plan_code` 为主键，存储各套餐的配额限制（`max_workspaces`、`max_bookmarks`、`max_collections`、`max_tags`、`max_saved_groups`、`trash_grace_days`）；OSS 版在 `billing/local.New()` 写入 `unlimited` 行（所有字段 -1），Cloud 版由 `meteroid.capacityStore` 定时从 Meteroid API 同步写入。`users.billing_synced_at BIGINT`：Cloud 版在 `createCustomerAndSubscription` 成功后写入 Unix 时间戳；OSS 版始终为 NULL（OSS 不调用 Meteroid）；用于防止 `OnUserCreated` / `EnsureUserSynced` 重复创建 Meteroid 订阅。
+- **schema 位置**：schema 文件在 `db/schema.pg.sql`（PostgreSQL，`//go:embed` 引用）。所有列已合并到 `CREATE TABLE` 定义，新增列通过 `ALTER TABLE … ADD COLUMN IF NOT EXISTS` 追加以兼容已存在的表（幂等）。原有限流表（`login_failures`、`otp_ip_requests`、`register_ip_requests`、`sse_tokens`）不存在于 schema，对应状态由 `internal/ratelimit` 和 `internal/store` 管理（in-memory 或 Redis）。`groups` / `group_tabs` 两张表：`groups` 含 `seq`/`deleted_at`/`is_deleted`/`workspace_id` 同步字段；`group_tabs` 以 `group_id REFERENCES groups(id) ON DELETE CASCADE` 外键关联，tab 列表无 seq，整体快照替换。`subscription_capacity` 表：以 `plan_code` 为主键，存储各套餐的配额限制（`max_workspaces`、`max_bookmarks`、`max_collections`、`max_tags`、`max_saved_groups`、`trash_grace_days`）；OSS 版在 `billing/local.New()` 写入 `unlimited` 行（所有字段 -1），Cloud 版由 `polar.capacityStore` 定时从 Polar API 同步写入。`users.billing_synced_at BIGINT`：Cloud 版在 `createCustomerAndSubscription` 成功后写入 Unix 时间戳；OSS 版始终为 NULL（OSS 不调用 Polar.sh）；用于防止 `OnUserCreated` / `EnsureUserSynced` 重复创建 Polar 订阅。
 - **三态删除**：`bookmarks.is_trashed INT`（0=active, 1=trashed, 2=permanently deleted）、`collections.is_deleted INT`、`groups.is_deleted INT` 含义相同。`model.Bookmark.IsTrashed` / `model.Collection.IsDeleted` / `model.Group.IsDeleted` 均为 `int`。`BookmarkRequest.IsTrashed` 仍为 `bool`（REST CRUD 路径，由 `boolToInt()` 转换为 int 写入 model）。Pull 响应原样返回 state=2 记录，供其他设备 `mergeFromServer` 删除本地副本。
 - **Cloud 扩展点**：在 `billing.Provider` 接口之外，Cloud 还可以实现 `billing.WebhookHandler` 接口，通过 `server.RegisterWebhook` 注册路由
 - **Captcha Widget**：`GET /captcha/widget` 提供一个 HTML 页面（由 `internal/handler/captcha.go` 提供），Chrome MV3 扩展将其嵌入 `<iframe>`，页面从配置的 `PROSOPO_BUNDLE_URL` 加载 Prosopo JS bundle，验证完成后通过 `postMessage` 将 token 传回父页面。CSP 由服务端动态构建，`script-src`/`connect-src` 均基于 `bundleOrigin`，支持官方 CDN 和自部署两种场景。**安全约束**：`frame-ancestors` 限制为 `chrome-extension:` 仅允许扩展页面嵌入；`postMessage` target 使用客户端通过 `parentOrigin` 查询参数传入的 `chrome-extension://` 来源（前端 `procaptcha.tsx` 传 `window.location.origin`），无该参数时回退 `'*'`（本地调试用）。`PUT /preferences` 请求体通过 `http.MaxBytesReader` 限制为 64 KB，超限返回 413。

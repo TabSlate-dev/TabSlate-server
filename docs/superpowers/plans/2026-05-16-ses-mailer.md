@@ -431,7 +431,7 @@
 
   In `CLAUDE.md`, find the environment variables table. After the row:
   ```
-  | `RESEND_FROM` | | Resend 发件人，如 `TabSlate <noreply@tabslate.app>` |
+  | `RESEND_FROM` | | Resend 发件人，如 `TabSlate <noreply@tabslate.com>` |
   ```
 
   Add four new rows:
@@ -439,7 +439,7 @@
   | `SES_ACCESS_KEY_ID` | | AWS access key ID（`MAIL_PROVIDER=ses` 时必填） |
   | `SES_SECRET_KEY` | | AWS secret access key（`MAIL_PROVIDER=ses` 时必填） |
   | `SES_REGION` | | SES 所在 AWS region，如 `us-east-1`（`MAIL_PROVIDER=ses` 时必填） |
-  | `SES_FROM` | | SES 发件人，如 `TabSlate <noreply@tabslate.app>`（`MAIL_PROVIDER=ses` 时必填） |
+  | `SES_FROM` | | SES 发件人，如 `TabSlate <noreply@tabslate.com>`（`MAIL_PROVIDER=ses` 时必填） |
   ```
 
   Also update the `MAIL_PROVIDER` row description from:
@@ -492,5 +492,5 @@ MAIL_PROVIDER=ses
 SES_ACCESS_KEY_ID=<your-key-id>
 SES_SECRET_KEY=<your-secret>
 SES_REGION=us-east-1
-SES_FROM=TabSlate <noreply@tabslate.app>
+SES_FROM=TabSlate <noreply@tabslate.com>
 ```
