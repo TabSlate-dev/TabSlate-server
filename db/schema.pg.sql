@@ -146,6 +146,12 @@ CREATE TABLE IF NOT EXISTS subscription_capacity (
 ALTER TABLE subscription_capacity ADD COLUMN IF NOT EXISTS max_saved_groups INTEGER NOT NULL DEFAULT -1;
 ALTER TABLE subscription_capacity ADD COLUMN IF NOT EXISTS trash_grace_days INTEGER NOT NULL DEFAULT 7;
 
+CREATE TABLE IF NOT EXISTS unibee_users (
+    user_id        TEXT   PRIMARY KEY,
+    unibee_user_id BIGINT NOT NULL,
+    created_at     BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())
+);
+
 -- Historical trashed collections with deleted_at set and archived_at NULL were
 -- stored as is_deleted = 0 due to a frontend bug. Promote them to trashed so
 -- the cleanup goroutine can auto-expire them. This backfill is idempotent.
