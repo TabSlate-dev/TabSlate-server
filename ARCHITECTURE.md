@@ -10,7 +10,7 @@ cmd/server/main.go
         ├── internal/infra       Hub / Cache / Limiter 工厂（REDIS_URL 为空 = in-memory）
         ├── internal/handler/*   HTTP handlers（各实体 + 认证 + 同步 + SSE）
         ├── internal/middleware  Auth JWT + IP 速率限制
-        ├── billing.Provider     接口，OSS = local.Provider；Cloud = unibee.Provider
+        ├── billing.Provider     接口，OSS = local.Provider；Cloud = flexprice.Provider
         └── gin.Engine           路由
 ```
 
@@ -27,7 +27,7 @@ TabSlate-server/
 │
 ├── billing/
 │   ├── types.go             # 共享类型：Limits（MaxWorkspaces/MaxBookmarks/MaxCollections/MaxTags/MaxSavedGroups/TrashGraceDays），Subscription，Invoice
-│   ├── provider.go          # Provider 接口：OnUserCreated/GetLimits/GetSubscription/CreateCheckout/ListInvoices/CancelSubscription
+│   ├── provider.go          # Provider 接口：OnUserCreated/GetLimits/GetSubscription/ChangePlan/ListInvoices/CancelSubscription
 │   └── local/
 │       ├── provider.go      # OSS 实现：keygen.sh License 验证用户数上限；超限用户自动暂停（suspended_at）+ 吊销 refresh token；实现 billing.InstanceLimiter
 │       ├── keygen.go        # keygenClient：FetchLicense / ActivateMachine / ValidateMachine；KeygenAPIURL + KeygenAccountID 编译时写入（-ldflags -X）
@@ -110,7 +110,7 @@ TabSlate-server/
 | GET | `/api/plan` | 套餐 + 配额上限 + 当前使用量汇总 | Bearer JWT |
 | GET | `/api/subscription` | 当前订阅信息 | Bearer JWT |
 | GET | `/api/limits` | 当前配额上限（60s 缓存） | Bearer JWT |
-| POST | `/api/checkout` | 创建结账会话（Cloud） | Bearer JWT |
+| POST | `/api/checkout` | 立即切换套餐，返回 `{"success": true}`（Cloud） | Bearer JWT |
 | GET | `/api/invoices` | 账单列表（Cloud） | Bearer JWT |
 | DELETE | `/api/subscription` | 取消订阅（Cloud） | Bearer JWT |
 
@@ -231,7 +231,7 @@ currentSeq(ctx, d *db.DB, userID) (int64, error)
 | `groups` | id, user_id, workspace_id, seq, deleted_at, **is_deleted INT** | `is_deleted`: 0/1/2 三态；软删除保留行 |
 | `group_tabs` | id, group_id FK→groups, title, url, favicon, position | 组内 tab；ON DELETE CASCADE；无 seq，整体快照替换 |
 | `refresh_tokens` | token_hash, user_id, expires_at | SHA-256 哈希存储，使用后轮换 |
-| `subscription_capacity` | plan_code PK, plan_id, max_workspaces, max_bookmarks, max_collections, max_tags, max_saved_groups, trash_grace_days, updated_at | 套餐配额；OSS 写 `unlimited`（全 -1）；Cloud 由 Unibee 同步写入；-1 = 不限制 |
+| `subscription_capacity` | plan_code PK, plan_id, max_workspaces, max_bookmarks, max_collections, max_tags, max_saved_groups, trash_grace_days, updated_at | 套餐配额；OSS 写 `unlimited`（全 -1）；Cloud（Flexprice）不使用此表，配额从 Entitlement API 实时读取；-1 = 不限制 |
 
 **Delta-pull 索引**（`schema.pg.sql` 末尾）：
 ```sql
@@ -279,7 +279,7 @@ cmd/server/main.go
       └── handler.New*(db, infra, search, ...)  # 各 handler 注入 Hub/Cache/Limiter
 ```
 
-Cloud 仓库只需将 `local.New(...)` 替换为 `unibee.New(...)`，调用 `bp.Start(ctx)` 启动容量同步 goroutine，并设置 `REDIS_URL` 即可实现水平扩展。
+Cloud 仓库只需将 `local.New(...)` 替换为 `flexprice.New(...)`，调用 `bp.ResolvePlans(ctx)` 解析套餐 UUID，并设置 `REDIS_URL` 即可实现水平扩展。Flexprice 无后台容量同步 goroutine，配额直接从 Entitlement API 按需读取（5 分钟 TTL 缓存）。
 
 ## 认证机制
 
