@@ -25,10 +25,10 @@ type Provider interface {
 	// Cloud: queries Lago.
 	GetSubscription(ctx context.Context, userID string) (*Subscription, error)
 
-	// GetCheckoutURL returns a URL to upgrade the user's plan.
-	// OSS: returns an error directing the user to purchase a License.
-	// Cloud: returns a Lago/Stripe checkout URL.
-	GetCheckoutURL(ctx context.Context, userID string, planCode string) (string, error)
+	// ChangePlan immediately switches the user to a different plan.
+	// OSS: returns an error directing the user to purchase a license.
+	// Cloud: calls the billing API to execute an immediate plan change.
+	ChangePlan(ctx context.Context, userID string, planCode string) error
 
 	// CancelSubscription cancels the user's active subscription.
 	// OSS: returns an error (not supported).

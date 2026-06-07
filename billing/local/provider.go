@@ -50,10 +50,10 @@ func (p *Provider) GetSubscription(_ context.Context, _ string) (*billing.Subscr
 	return &billing.Subscription{Plan: billing.PlanPro, Status: "active"}, nil
 }
 
-// GetCheckoutURL is not supported in the OSS edition.
-func (p *Provider) GetCheckoutURL(_ context.Context, _, _ string) (string, error) {
-	return "", fmt.Errorf(
-		"online checkout is not available in the OSS edition; " +
+// ChangePlan is not supported in the OSS edition.
+func (p *Provider) ChangePlan(_ context.Context, _, _ string) error {
+	return fmt.Errorf(
+		"online plan change is not available in the OSS edition; " +
 			"visit https://tabslate.com/pricing to purchase a license",
 	)
 }
