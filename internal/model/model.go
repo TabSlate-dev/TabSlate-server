@@ -19,6 +19,7 @@ type User struct {
 	PasswordHash string `json:"-"`
 	CreatedAt    int64  `json:"created_at"`
 	UpdatedAt    int64  `json:"updated_at"`
+	SuspendedAt  *int64 `json:"-"`
 }
 
 // Subscription holds a user's plan info.

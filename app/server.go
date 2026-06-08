@@ -180,7 +180,8 @@ func (s *Server) setupRoutes() {
 	authH := handler.NewAuthHandler(s.db, s.cfg.JWTSecret, s.billing, s.captcha, s.mailer,
 		s.infra.Limiter, s.infra.Cache,
 		s.cfg.RegisterCaptchaThreshold, s.cfg.RegisterCaptchaWindow,
-		s.cfg.OTPCaptchaThreshold, s.cfg.OTPCaptchaWindow)
+		s.cfg.OTPCaptchaThreshold, s.cfg.OTPCaptchaWindow,
+		s.cfg.AllowRegistration)
 	captchaH := handler.NewCaptchaHandler(s.cfg.ProsopoBundleURL)
 	wsH := handler.NewWorkspaceHandler(s.db, s.infra.Hub, s.billing)
 	colH := handler.NewCollectionHandler(s.db, s.infra.Hub, s.billing)

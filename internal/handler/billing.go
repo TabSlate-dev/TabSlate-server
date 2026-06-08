@@ -148,12 +148,11 @@ func (h *BillingHandler) CreateCheckout(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	url, err := h.billing.GetCheckoutURL(c.Request.Context(), userID, body.PlanCode)
-	if err != nil {
+	if err := h.billing.ChangePlan(c.Request.Context(), userID, body.PlanCode); err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"url": url})
+	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
 // GET /api/invoices?page=1&per_page=20

@@ -4,12 +4,89 @@ package mailer
 import (
 	"bytes"
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/smtp"
 	"time"
 )
+
+//go:embed templates/*.html
+var tmplFS embed.FS
+
+type otpData struct {
+	Name        string
+	Heading     string
+	Intro       string
+	Code        string
+	Note        string
+	PrivacyText string
+	PrivacyURL  string
+	TermsText   string
+	TermsURL    string
+}
+
+type otpStrings struct {
+	Subject string
+	Heading string
+	Intro   string
+	Note    string
+}
+
+type legalLinkSet struct {
+	PrivacyText string
+	PrivacyURL  string
+	TermsText   string
+	TermsURL    string
+}
+
+var translations = map[string]map[string]otpStrings{
+	"verify": {
+		"en": {
+			Subject: "Verify your TabSlate email",
+			Heading: "Confirm your email address",
+			Intro:   "Enter the code below to verify your email. It expires in 10 minutes.",
+			Note:    "If you didn't create an account, you can safely ignore this email.",
+		},
+		"zh": {
+			Subject: "验证您的 TabSlate 邮箱",
+			Heading: "确认您的邮箱地址",
+			Intro:   "请在下方输入验证码完成邮箱验证，验证码 10 分钟内有效。",
+			Note:    "如果您没有注册账号，请忽略此邮件。",
+		},
+	},
+	"reset": {
+		"en": {
+			Subject: "Reset your TabSlate password",
+			Heading: "Reset your password",
+			Intro:   "Enter the code below to reset your password. It expires in 10 minutes.",
+			Note:    "If you didn't request a password reset, you can safely ignore this email.",
+		},
+		"zh": {
+			Subject: "重置您的 TabSlate 密码",
+			Heading: "重置密码",
+			Intro:   "请在下方输入验证码以重置密码，验证码 10 分钟内有效。",
+			Note:    "如果您没有申请重置密码，请忽略此邮件。",
+		},
+	},
+}
+
+var legalLinks = map[string]legalLinkSet{
+	"en": {
+		PrivacyText: "Privacy Policy",
+		PrivacyURL:  "https://tabslate.com/en/privacy-policy",
+		TermsText:   "Terms",
+		TermsURL:    "https://tabslate.com/en/terms",
+	},
+	"zh": {
+		PrivacyText: "隐私政策",
+		PrivacyURL:  "https://tabslate.com/zh/privacy-policy",
+		TermsText:   "服务条款",
+		TermsURL:    "https://tabslate.com/zh/terms",
+	},
+}
 
 // Mailer sends transactional emails.
 // If provider is empty, sending is a no-op (useful for dev / self-hosted without email).
@@ -34,6 +111,7 @@ type Mailer struct {
 	sesFrom        string
 
 	client *http.Client
+	tmpl   *template.Template
 }
 
 // Config holds the mail provider configuration.
@@ -62,14 +140,14 @@ type Config struct {
 // If Config.Provider is empty, the mailer is disabled (Send is a no-op).
 func New(cfg Config) *Mailer {
 	return &Mailer{
-		provider:     cfg.Provider,
-		smtpHost:     cfg.SMTPHost,
-		smtpPort:     cfg.SMTPPort,
-		smtpUser:     cfg.SMTPUser,
-		smtpPass:     cfg.SMTPPassword,
-		smtpFrom:     cfg.SMTPFrom,
-		resendAPIKey: cfg.ResendAPIKey,
-		resendFrom:   cfg.ResendFrom,
+		provider:       cfg.Provider,
+		smtpHost:       cfg.SMTPHost,
+		smtpPort:       cfg.SMTPPort,
+		smtpUser:       cfg.SMTPUser,
+		smtpPass:       cfg.SMTPPassword,
+		smtpFrom:       cfg.SMTPFrom,
+		resendAPIKey:   cfg.ResendAPIKey,
+		resendFrom:     cfg.ResendFrom,
 		sesAccessKeyID: cfg.SESAccessKeyID,
 		sesSecretKey:   cfg.SESSecretKey,
 		sesRegion:      cfg.SESRegion,
@@ -77,6 +155,7 @@ func New(cfg Config) *Mailer {
 		client: &http.Client{
 			Timeout: 15 * time.Second,
 		},
+		tmpl: template.Must(template.ParseFS(tmplFS, "templates/otp.html")),
 	}
 }
 
@@ -98,6 +177,50 @@ func (m *Mailer) Send(ctx context.Context, to, subject, htmlBody string) error {
 		// Disabled — silently succeed so that dev environments work without email.
 		return nil
 	}
+}
+
+// SendOTP renders the OTP email template and sends it.
+func (m *Mailer) SendOTP(ctx context.Context, to, name, code, purpose, lang string) error {
+	subject, body, err := m.renderOTP(name, code, purpose, lang)
+	if err != nil {
+		return err
+	}
+
+	return m.Send(ctx, to, subject, body)
+}
+
+func (m *Mailer) renderOTP(name, code, purpose, lang string) (string, string, error) {
+	byPurpose, ok := translations[purpose]
+	if !ok {
+		return "", "", fmt.Errorf("unknown otp purpose %q", purpose)
+	}
+
+	copy := byPurpose["en"]
+	if byLang, ok := byPurpose[lang]; ok {
+		copy = byLang
+	}
+
+	links := legalLinks["en"]
+	if localized, ok := legalLinks[lang]; ok {
+		links = localized
+	}
+
+	var body bytes.Buffer
+	if err := m.tmpl.Execute(&body, otpData{
+		Name:        name,
+		Heading:     copy.Heading,
+		Intro:       copy.Intro,
+		Code:        code,
+		Note:        copy.Note,
+		PrivacyText: links.PrivacyText,
+		PrivacyURL:  links.PrivacyURL,
+		TermsText:   links.TermsText,
+		TermsURL:    links.TermsURL,
+	}); err != nil {
+		return "", "", fmt.Errorf("render otp template: %w", err)
+	}
+
+	return copy.Subject, body.String(), nil
 }
 
 func (m *Mailer) sendSMTP(to, subject, htmlBody string) error {

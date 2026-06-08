@@ -23,8 +23,10 @@ type Config struct {
 	// GinMode sets the Gin framework mode ("debug", "release", "test").
 	GinMode string
 
-	// LicenseKey is the optional OSS License JWT. Leave empty for free-tier mode.
-	LicenseKey string
+	// AllowRegistration controls whether new user registration is open.
+	// Set ALLOW_REGISTRATION=false to close registration after initial setup.
+	// Defaults to true.
+	AllowRegistration bool
 
 	// ── Prosopo Captcha ──────────────────────────────────────────────────────
 	// ProsopoSecret is the site secret for server-side verification.
@@ -127,11 +129,11 @@ type Config struct {
 // required variable that is missing.
 func LoadConfig() *Config {
 	return &Config{
-		DatabaseURL: mustEnv("DATABASE_URL"),
-		JWTSecret:   mustEnv("JWT_SECRET"),
-		Port:        envOr("PORT", "8080"),
-		GinMode:     os.Getenv("GIN_MODE"),
-		LicenseKey:  os.Getenv("LICENSE_KEY"),
+		DatabaseURL:       mustEnv("DATABASE_URL"),
+		JWTSecret:         mustEnv("JWT_SECRET"),
+		Port:              envOr("PORT", "8080"),
+		GinMode:           os.Getenv("GIN_MODE"),
+		AllowRegistration: os.Getenv("ALLOW_REGISTRATION") != "false",
 
 		// Prosopo
 		ProsopoSecret:    os.Getenv("PROSOPO_SECRET"),
@@ -139,14 +141,14 @@ func LoadConfig() *Config {
 		ProsopoBundleURL: envOr("PROSOPO_BUNDLE_URL", "https://js.prosopo.io/js/procaptcha.bundle.js"),
 
 		// Email
-		MailProvider:  os.Getenv("MAIL_PROVIDER"),
-		SMTPHost:      os.Getenv("SMTP_HOST"),
-		SMTPPort:      envOr("SMTP_PORT", "587"),
-		SMTPUser:      os.Getenv("SMTP_USER"),
-		SMTPPassword:  os.Getenv("SMTP_PASSWORD"),
-		SMTPFrom:      os.Getenv("SMTP_FROM"),
-		ResendAPIKey:  os.Getenv("RESEND_API_KEY"),
-		ResendFrom:    os.Getenv("RESEND_FROM"),
+		MailProvider: os.Getenv("MAIL_PROVIDER"),
+		SMTPHost:     os.Getenv("SMTP_HOST"),
+		SMTPPort:     envOr("SMTP_PORT", "587"),
+		SMTPUser:     os.Getenv("SMTP_USER"),
+		SMTPPassword: os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:     os.Getenv("SMTP_FROM"),
+		ResendAPIKey: os.Getenv("RESEND_API_KEY"),
+		ResendFrom:   os.Getenv("RESEND_FROM"),
 
 		SESAccessKeyID: os.Getenv("SES_ACCESS_KEY_ID"),
 		SESSecretKey:   os.Getenv("SES_SECRET_KEY"),

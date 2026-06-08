@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"strings"
 	"time"
 	"unicode"
 
@@ -37,7 +38,6 @@ const (
 
 	// otpEmailCooldown is the minimum interval between OTP emails to the same address.
 	otpEmailCooldown = 60 * time.Second
-
 )
 
 type AuthHandler struct {
@@ -48,6 +48,8 @@ type AuthHandler struct {
 	mailer  *mailer.Mailer
 	limiter ratelimit.Limiter
 	cache   store.Cache
+
+	registrationOpen bool
 
 	registerCaptchaThreshold int
 	registerCaptchaWindow    time.Duration
@@ -68,6 +70,7 @@ func NewAuthHandler(
 	registerWindow time.Duration,
 	otpThreshold int,
 	otpWindow time.Duration,
+	registrationOpen bool,
 ) *AuthHandler {
 	return &AuthHandler{
 		db:                       d,
@@ -77,6 +80,7 @@ func NewAuthHandler(
 		mailer:                   m,
 		limiter:                  l,
 		cache:                    cache,
+		registrationOpen:         registrationOpen,
 		registerCaptchaThreshold: registerThreshold,
 		registerCaptchaWindow:    registerWindow,
 		otpCaptchaThreshold:      otpThreshold,
@@ -86,6 +90,12 @@ func NewAuthHandler(
 
 // POST /auth/register
 func (h *AuthHandler) Register(c *gin.Context) {
+	// ── Step 0: Registration gate ─────────────────────────────────────────────
+	if !h.registrationOpen {
+		c.JSON(http.StatusForbidden, gin.H{"error": "registration is disabled on this instance"})
+		return
+	}
+
 	var req model.RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -118,6 +128,13 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	if count > 0 {
 		c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
 		return
+	}
+
+	if il, ok := h.billing.(billing.InstanceLimiter); ok {
+		if err := il.CheckRegistrationAllowed(ctx); err != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	hash, err := auth.HashPassword(req.Password)
@@ -168,7 +185,8 @@ func (h *AuthHandler) Register(c *gin.Context) {
 
 	// ── Step 5: Send OTP email or sync to billing immediately ────────────────
 	if h.mailer.Enabled() {
-		go h.sendOTPEmail(req.Email, req.Name, otp, "verify")
+		lang := parseLang(c.GetHeader("Accept-Language"))
+		go h.sendOTPEmail(req.Email, req.Name, otp, "verify", lang)
 		// billing.OnUserCreated is deferred until email is verified.
 	} else {
 		// No email provider → user is auto-verified → sync to billing now.
@@ -209,9 +227,9 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	var user model.User
 	err := h.db.QueryRow(ctx,
-		`SELECT id, name, email, password_hash, is_verified, created_at, updated_at FROM users WHERE email = $1`,
+		`SELECT id, name, email, password_hash, is_verified, created_at, updated_at, suspended_at FROM users WHERE email = $1`,
 		req.Email,
-	).Scan(&user.ID, &user.Name, &user.Email, &user.PasswordHash, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt)
+	).Scan(&user.ID, &user.Name, &user.Email, &user.PasswordHash, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt, &user.SuspendedAt)
 	if err != nil {
 		h.recordLoginFailure(ctx, req.Email)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
@@ -226,6 +244,11 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	// Clear failures on success.
 	h.limiter.ResetCounter(ctx, "tabslate:auth:login_fail:"+req.Email)
+
+	if user.SuspendedAt != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "account suspended: instance user limit exceeded"})
+		return
+	}
 
 	// If the user hasn't verified their email yet, refresh the OTP so they
 	// always have a fresh code when they arrive at the verification screen.
@@ -242,11 +265,12 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			otpHash := hashOTP(otp)
 			otpExpires := time.Now().Add(otpTTL).Unix()
 			loginNow := time.Now().Unix()
+			lang := parseLang(c.GetHeader("Accept-Language"))
 			h.db.Exec(ctx,
 				`UPDATE users SET verification_token = $1, verification_expires_at = $2, otp_last_sent_at = $3, verification_attempts = 0, updated_at = $3 WHERE id = $4`,
 				otpHash, otpExpires, loginNow, user.ID,
 			)
-			go h.sendOTPEmail(user.Email, user.Name, otp, "verify")
+			go h.sendOTPEmail(user.Email, user.Name, otp, "verify", lang)
 		}
 	}
 
@@ -384,7 +408,8 @@ func (h *AuthHandler) ResendVerification(c *gin.Context) {
 	)
 	h.recordOTPIPRequest(ctx, ip)
 
-	go h.sendOTPEmail(req.Email, name, otp, "verify")
+	lang := parseLang(c.GetHeader("Accept-Language"))
+	go h.sendOTPEmail(req.Email, name, otp, "verify", lang)
 
 	c.JSON(http.StatusOK, gin.H{"message": "if the email is registered and unverified, a new code has been sent"})
 }
@@ -443,7 +468,8 @@ func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 	)
 	h.recordOTPIPRequest(ctx, ip)
 
-	go h.sendOTPEmail(req.Email, name, otp, "reset")
+	lang := parseLang(c.GetHeader("Accept-Language"))
+	go h.sendOTPEmail(req.Email, name, otp, "reset", lang)
 
 	c.JSON(http.StatusOK, gin.H{"message": "if the email is registered, a reset code has been sent"})
 }
@@ -560,9 +586,14 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 
 	var user model.User
 	if err := h.db.QueryRow(ctx,
-		`SELECT id, name, email, is_verified, created_at, updated_at FROM users WHERE id = $1`, userID,
-	).Scan(&user.ID, &user.Name, &user.Email, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt); err != nil {
+		`SELECT id, name, email, is_verified, created_at, updated_at, suspended_at FROM users WHERE id = $1`, userID,
+	).Scan(&user.ID, &user.Name, &user.Email, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt, &user.SuspendedAt); err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired refresh token"})
+		return
+	}
+
+	if user.SuspendedAt != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "account suspended: instance user limit exceeded"})
 		return
 	}
 
@@ -701,28 +732,16 @@ func (h *AuthHandler) recordRegisterIPRequest(ctx context.Context, ip string) {
 	h.limiter.IncrCounter(ctx, "tabslate:auth:reg_ip:"+ip, h.registerCaptchaWindow)
 }
 
-// sendOTPEmail sends a 6-digit OTP email. purpose: "verify" or "reset".
-func (h *AuthHandler) sendOTPEmail(to, name, code, purpose string) {
-	var subject, intro, note string
-	switch purpose {
-	case "reset":
-		subject = "Reset your TabSlate password"
-		intro = "Use the code below to reset your password. It expires in 10 minutes."
-		note = "If you didn't request a password reset, you can safely ignore this email."
-	default:
-		subject = "Verify your TabSlate email"
-		intro = "Use the code below to verify your email address. It expires in 10 minutes."
-		note = "If you didn't create an account, you can safely ignore this email."
+func parseLang(acceptLang string) string {
+	if strings.Contains(strings.ToLower(acceptLang), "zh") {
+		return "zh"
 	}
+	return "en"
+}
 
-	body := fmt.Sprintf(`<html><body>
-<p>Hi %s,</p>
-<p>%s</p>
-<p style="font-size:2em;letter-spacing:0.15em;font-weight:bold;">%s</p>
-<p>%s</p>
-</body></html>`, name, intro, code, note)
-
-	if err := h.mailer.Send(context.Background(), to, subject, body); err != nil {
+// sendOTPEmail sends a 6-digit OTP email. purpose: "verify" or "reset".
+func (h *AuthHandler) sendOTPEmail(to, name, code, purpose, lang string) {
+	if err := h.mailer.SendOTP(context.Background(), to, name, code, purpose, lang); err != nil {
 		log.Printf("failed to send OTP email to %s: %v", to, err)
 	}
 }
