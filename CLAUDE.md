@@ -10,9 +10,9 @@ TabSlate 由三个仓库组成：
 |---|---|---|
 | **`TabSlate`** | 公开，AGPL | Chrome 扩展前端，TypeScript + React + WXT |
 | **`TabSlate-server`**（本仓库） | 公开，AGPL-3.0 | Go 后端，AGPL 开源，用户数无上限，可自托管；禁止未经授权将本后端用于商业收费服务 |
-| **`TabSlate-cloud`** | 私有 | Go 后端 Cloud 版，以本仓库为 Go module 依赖，注入 Flexprice 计费 |
+| **`TabSlate-Cloud`** | 私有（`github.com/TabSlate-dev/TabSlate-Cloud`） | Go 后端 Cloud 版，以本仓库为 Go module 依赖，注入 Flexprice 计费 |
 
-`TabSlate-cloud` 通过 `require github.com/tabslate/server` + `replace` 指令引用本仓库，仅需替换 `billing.Provider` 实现即可获得完整后端能力。Cloud 仓库可直接导入本仓库的 `billing/`、`db/`、`app/` 公开包，`internal/` 包对外部模块不可见（Go 模块系统强制）。
+`TabSlate-Cloud` 通过 `require github.com/TabSlate-dev/TabSlate-server` 引用本仓库（本地开发用 `go.work` 覆盖），仅需替换 `billing.Provider` 实现即可获得完整后端能力。Cloud 仓库可直接导入本仓库的 `billing/`、`db/`、`app/` 公开包，`internal/` 包对外部模块不可见（Go 模块系统强制）。
 
 ---
 
