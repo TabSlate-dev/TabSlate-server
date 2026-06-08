@@ -12,6 +12,9 @@ import (
 )
 
 var _ billing.Provider = (*Provider)(nil)
+var _ billing.InstanceLimiter = (*Provider)(nil)
+
+const defaultFreeUsers = 3
 
 // Provider is the OSS billing implementation.
 type Provider struct {
@@ -21,6 +24,22 @@ type Provider struct {
 // New creates a local Provider. Pass nil for db only in tests.
 func New(d *db.DB) *Provider {
 	return &Provider{db: d}
+}
+
+// CheckRegistrationAllowed returns an error when the verified-user count has
+// reached the free-tier limit of 3.
+func (p *Provider) CheckRegistrationAllowed(ctx context.Context) error {
+	if p.db == nil {
+		return nil
+	}
+	var count int
+	if err := p.db.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE is_verified = true`).Scan(&count); err != nil {
+		return fmt.Errorf("billing/local: user count: %w", err)
+	}
+	if count >= defaultFreeUsers {
+		return fmt.Errorf("user limit reached: this instance allows %d verified users", defaultFreeUsers)
+	}
+	return nil
 }
 
 // OnUserCreated is a no-op for the OSS edition.

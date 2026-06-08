@@ -8,6 +8,7 @@ import (
 )
 
 var _ billing.Provider = (*Provider)(nil)
+var _ billing.InstanceLimiter = (*Provider)(nil)
 
 func TestNew_returnsProvider(t *testing.T) {
 	p := New(nil)
@@ -27,6 +28,13 @@ func TestGetSubscription_alwaysPro(t *testing.T) {
 	}
 	if sub.Status != "active" {
 		t.Errorf("status = %q, want active", sub.Status)
+	}
+}
+
+func TestCheckRegistrationAllowed_nilDB_allowsRegistration(t *testing.T) {
+	p := New(nil)
+	if err := p.CheckRegistrationAllowed(context.Background()); err != nil {
+		t.Fatalf("nil DB should allow registration, got: %v", err)
 	}
 }
 

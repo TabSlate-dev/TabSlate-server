@@ -130,6 +130,13 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
+	if il, ok := h.billing.(billing.InstanceLimiter); ok {
+		if err := il.CheckRegistrationAllowed(ctx); err != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
