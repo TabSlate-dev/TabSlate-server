@@ -7,9 +7,9 @@ import (
 	"syscall"
 
 	"github.com/joho/godotenv"
-	"github.com/tabslate/server/app"
-	"github.com/tabslate/server/billing/local"
-	"github.com/tabslate/server/db"
+	"github.com/TabSlate-dev/TabSlate-server/app"
+	"github.com/TabSlate-dev/TabSlate-server/billing/local"
+	"github.com/TabSlate-dev/TabSlate-server/db"
 )
 
 func main() {

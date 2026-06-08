@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/tabslate/server/db"
+	"github.com/TabSlate-dev/TabSlate-server/db"
 )
 
 // incrementSeq atomically increments the per-user sync sequence counter inside

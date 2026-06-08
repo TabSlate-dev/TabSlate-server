@@ -7,12 +7,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
-	"github.com/tabslate/server/billing"
-	"github.com/tabslate/server/db"
-	"github.com/tabslate/server/internal/middleware"
-	"github.com/tabslate/server/internal/model"
-	"github.com/tabslate/server/internal/pubsub"
-	"github.com/tabslate/server/internal/search"
+	"github.com/TabSlate-dev/TabSlate-server/billing"
+	"github.com/TabSlate-dev/TabSlate-server/db"
+	"github.com/TabSlate-dev/TabSlate-server/internal/middleware"
+	"github.com/TabSlate-dev/TabSlate-server/internal/model"
+	"github.com/TabSlate-dev/TabSlate-server/internal/pubsub"
+	"github.com/TabSlate-dev/TabSlate-server/internal/search"
 )
 
 type SyncHandler struct {

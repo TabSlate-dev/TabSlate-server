@@ -1,4 +1,4 @@
-module github.com/tabslate/server
+module github.com/TabSlate-dev/TabSlate-server
 
 go 1.25.0
 

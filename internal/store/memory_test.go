@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tabslate/server/internal/store"
+	"github.com/TabSlate-dev/TabSlate-server/internal/store"
 )
 
 func TestInMemoryCache_SetAndGet(t *testing.T) {

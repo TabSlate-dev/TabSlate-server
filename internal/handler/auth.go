@@ -14,15 +14,15 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/tabslate/server/billing"
-	"github.com/tabslate/server/db"
-	"github.com/tabslate/server/internal/auth"
-	"github.com/tabslate/server/internal/captcha"
-	"github.com/tabslate/server/internal/mailer"
-	"github.com/tabslate/server/internal/middleware"
-	"github.com/tabslate/server/internal/model"
-	"github.com/tabslate/server/internal/ratelimit"
-	"github.com/tabslate/server/internal/store"
+	"github.com/TabSlate-dev/TabSlate-server/billing"
+	"github.com/TabSlate-dev/TabSlate-server/db"
+	"github.com/TabSlate-dev/TabSlate-server/internal/auth"
+	"github.com/TabSlate-dev/TabSlate-server/internal/captcha"
+	"github.com/TabSlate-dev/TabSlate-server/internal/mailer"
+	"github.com/TabSlate-dev/TabSlate-server/internal/middleware"
+	"github.com/TabSlate-dev/TabSlate-server/internal/model"
+	"github.com/TabSlate-dev/TabSlate-server/internal/ratelimit"
+	"github.com/TabSlate-dev/TabSlate-server/internal/store"
 )
 
 const (

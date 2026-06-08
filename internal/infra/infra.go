@@ -5,9 +5,9 @@ import (
 	"log"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/tabslate/server/internal/pubsub"
-	"github.com/tabslate/server/internal/ratelimit"
-	"github.com/tabslate/server/internal/store"
+	"github.com/TabSlate-dev/TabSlate-server/internal/pubsub"
+	"github.com/TabSlate-dev/TabSlate-server/internal/ratelimit"
+	"github.com/TabSlate-dev/TabSlate-server/internal/store"
 )
 
 // Providers holds the three infrastructure providers wired by New.

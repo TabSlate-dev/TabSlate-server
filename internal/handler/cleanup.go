@@ -5,7 +5,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/tabslate/server/db"
+	"github.com/TabSlate-dev/TabSlate-server/db"
 )
 
 // tombstoneWindowDays is the maximum expected delta-sync lag across devices.

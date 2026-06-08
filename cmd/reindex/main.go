@@ -19,9 +19,9 @@ import (
 
 	"github.com/joho/godotenv"
 	meilisearch "github.com/meilisearch/meilisearch-go"
-	"github.com/tabslate/server/app"
-	"github.com/tabslate/server/db"
-	"github.com/tabslate/server/internal/search"
+	"github.com/TabSlate-dev/TabSlate-server/app"
+	"github.com/TabSlate-dev/TabSlate-server/db"
+	"github.com/TabSlate-dev/TabSlate-server/internal/search"
 )
 
 func main() {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tabslate/server/billing"
+	"github.com/TabSlate-dev/TabSlate-server/billing"
 )
 
 var _ billing.Provider = (*Provider)(nil)

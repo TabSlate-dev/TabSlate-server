@@ -4,8 +4,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tabslate/server/internal/middleware"
-	"github.com/tabslate/server/internal/search"
+	"github.com/TabSlate-dev/TabSlate-server/internal/middleware"
+	"github.com/TabSlate-dev/TabSlate-server/internal/search"
 )
 
 type SearchHandler struct {

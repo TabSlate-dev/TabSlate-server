@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tabslate/server/internal/ratelimit"
+	"github.com/TabSlate-dev/TabSlate-server/internal/ratelimit"
 )
 
 func TestInMemoryLimiter_Allow_UnderLimit(t *testing.T) {

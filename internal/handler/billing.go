@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tabslate/server/billing"
-	"github.com/tabslate/server/db"
-	"github.com/tabslate/server/internal/middleware"
-	"github.com/tabslate/server/internal/store"
+	"github.com/TabSlate-dev/TabSlate-server/billing"
+	"github.com/TabSlate-dev/TabSlate-server/db"
+	"github.com/TabSlate-dev/TabSlate-server/internal/middleware"
+	"github.com/TabSlate-dev/TabSlate-server/internal/store"
 )
 
 // BillingHandler exposes plan, limits, checkout, and invoice endpoints.

@@ -7,8 +7,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/tabslate/server/billing"
-	"github.com/tabslate/server/db"
+	"github.com/TabSlate-dev/TabSlate-server/billing"
+	"github.com/TabSlate-dev/TabSlate-server/db"
 )
 
 var _ billing.Provider = (*Provider)(nil)

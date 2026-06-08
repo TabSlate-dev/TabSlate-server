@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tabslate/server/internal/ratelimit"
+	"github.com/TabSlate-dev/TabSlate-server/internal/ratelimit"
 )
 
 // RateLimitByIP returns a Gin middleware that limits requests by client IP.

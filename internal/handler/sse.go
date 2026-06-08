@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tabslate/server/internal/pubsub"
-	"github.com/tabslate/server/internal/store"
+	"github.com/TabSlate-dev/TabSlate-server/internal/pubsub"
+	"github.com/TabSlate-dev/TabSlate-server/internal/store"
 )
 
 type SSEHandler struct {

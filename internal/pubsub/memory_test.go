@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tabslate/server/internal/pubsub"
+	"github.com/TabSlate-dev/TabSlate-server/internal/pubsub"
 )
 
 func TestInMemoryHub_BroadcastReachesSubscriber(t *testing.T) {

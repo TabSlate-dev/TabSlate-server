@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tabslate/server/db"
-	"github.com/tabslate/server/internal/middleware"
+	"github.com/TabSlate-dev/TabSlate-server/db"
+	"github.com/TabSlate-dev/TabSlate-server/internal/middleware"
 )
 
 type PreferencesHandler struct {

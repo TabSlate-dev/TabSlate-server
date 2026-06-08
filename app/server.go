@@ -10,14 +10,14 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/tabslate/server/billing"
-	"github.com/tabslate/server/db"
-	"github.com/tabslate/server/internal/captcha"
-	"github.com/tabslate/server/internal/handler"
-	"github.com/tabslate/server/internal/infra"
-	"github.com/tabslate/server/internal/mailer"
-	"github.com/tabslate/server/internal/middleware"
-	"github.com/tabslate/server/internal/search"
+	"github.com/TabSlate-dev/TabSlate-server/billing"
+	"github.com/TabSlate-dev/TabSlate-server/db"
+	"github.com/TabSlate-dev/TabSlate-server/internal/captcha"
+	"github.com/TabSlate-dev/TabSlate-server/internal/handler"
+	"github.com/TabSlate-dev/TabSlate-server/internal/infra"
+	"github.com/TabSlate-dev/TabSlate-server/internal/mailer"
+	"github.com/TabSlate-dev/TabSlate-server/internal/middleware"
+	"github.com/TabSlate-dev/TabSlate-server/internal/search"
 )
 
 // Server is the HTTP server for the TabSlate backend.
