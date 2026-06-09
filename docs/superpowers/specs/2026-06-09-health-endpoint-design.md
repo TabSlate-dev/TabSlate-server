@@ -75,8 +75,8 @@ func (s *Server) HealthCheck(ctx context.Context) map[string]error {
 
 **`internal/flexprice/provider.go`** — add `Ping(ctx context.Context) error`:
 - Calls `POST /plans/search` with `{"limit":1}` using the existing `doPost` helper
-- Any non-network response (even 4xx) is treated as reachable
-- Network error or timeout → return error
+- 2xx response → healthy (connectivity + API key valid)
+- Non-2xx, network error, or timeout → return error (marks `flexprice` as failed)
 
 **`cmd/server/main.go`** — register the route after `srv` is constructed, before `srv.Run()`:
 ```go
