@@ -145,3 +145,14 @@ func (c *Client) SearchBookmarks(userID, query string) ([]BookmarkDoc, error) {
 	}
 	return docs, nil
 }
+
+// Ping checks MeiliSearch connectivity. Returns nil when client is nil (not configured).
+func (c *Client) Ping(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	if _, err := c.svc.HealthWithContext(ctx); err != nil {
+		return fmt.Errorf("meilisearch ping: %w", err)
+	}
+	return nil
+}
