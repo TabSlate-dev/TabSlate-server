@@ -1,13 +1,14 @@
 package infra
 
 import (
+	"context"
 	"fmt"
 	"log"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/TabSlate-dev/TabSlate-server/internal/pubsub"
 	"github.com/TabSlate-dev/TabSlate-server/internal/ratelimit"
 	"github.com/TabSlate-dev/TabSlate-server/internal/store"
+	"github.com/redis/go-redis/v9"
 )
 
 // Providers holds the three infrastructure providers wired by New.
@@ -15,6 +16,18 @@ type Providers struct {
 	Hub     pubsub.Hub
 	Cache   store.Cache
 	Limiter ratelimit.Limiter
+	rdb     *redis.Client
+}
+
+// Ping checks Redis connectivity. Returns nil when Redis is not configured (in-memory mode).
+func (p *Providers) Ping(ctx context.Context) error {
+	if p.rdb == nil {
+		return nil
+	}
+	if err := p.rdb.Ping(ctx).Err(); err != nil {
+		return fmt.Errorf("redis ping: %w", err)
+	}
+	return nil
 }
 
 // New creates Providers from redisURL.
@@ -50,6 +63,7 @@ func New(redisURL string) (*Providers, func(), error) {
 		Hub:     hub,
 		Cache:   store.NewRedisCache(rdb),
 		Limiter: ratelimit.NewRedisLimiter(rdb),
+		rdb:     rdb,
 	}
 	success = true
 	return p, func() { hub.Close(); rdb.Close() }, nil
