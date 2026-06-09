@@ -115,6 +115,30 @@ func (s *Server) RegisterWebhook(path string, h gin.HandlerFunc) {
 	s.router.POST(path, h)
 }
 
+// RegisterRoute registers a handler for any HTTP method. Used by the Cloud edition
+// to inject edition-specific routes (e.g. GET /health/ping) after construction.
+func (s *Server) RegisterRoute(method, path string, h gin.HandlerFunc) {
+	s.router.Handle(method, path, h)
+}
+
+// HealthCheck probes server-owned dependencies and returns a map of
+// component name -> error for every failing check.
+// Redis is omitted when not configured (in-memory mode); MeiliSearch is
+// omitted when not configured (s.search == nil).
+func (s *Server) HealthCheck(ctx context.Context) map[string]error {
+	result := map[string]error{}
+	if err := s.db.Ping(ctx); err != nil {
+		result["database"] = err
+	}
+	if err := s.infra.Ping(ctx); err != nil {
+		result["redis"] = err
+	}
+	if err := s.search.Ping(ctx); err != nil {
+		result["meilisearch"] = err
+	}
+	return result
+}
+
 // SyncSubscription updates the local subscriptions table to match the billing
 // platform's state. Called by the Cloud edition when a Lago webhook confirms
 // a plan change, so that billing-backed quota checks stay accurate.
