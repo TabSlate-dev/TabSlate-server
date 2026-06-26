@@ -172,13 +172,13 @@ func (h *CleanupHandler) phase3(ctx context.Context) {
 	thirtyDays := int64(30 * 24 * 60 * 60)
 
 	rows, err := h.db.Query(ctx,
-		`SELECT id, name, email, GREATEST(COALESCE(last_login_at, 0), deletion_requested_at)
+		`SELECT id, name, email, deletion_requested_at
 		 FROM users
 		 WHERE deletion_requested_at IS NOT NULL
-		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + $1::bigint > $2::bigint
-		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + $3::bigint <= $4::bigint + $5::bigint
+		   AND deletion_requested_at + $1 > $2
+		   AND deletion_requested_at + $1 <= $2 + $3
 		   AND deletion_reminder_sent_at IS NULL`,
-		thirtyDays, now, thirtyDays, now, threeDays,
+		thirtyDays, now, threeDays,
 	)
 	if err != nil {
 		log.Printf("cleanup phase3 query: %v", err)
@@ -187,15 +187,15 @@ func (h *CleanupHandler) phase3(ctx context.Context) {
 	defer rows.Close()
 
 	type candidate struct {
-		id    string
-		name  string
-		email string
-		basis int64
+		id                 string
+		name               string
+		email              string
+		deletionRequestedAt int64
 	}
 	var candidates []candidate
 	for rows.Next() {
 		var c candidate
-		if err := rows.Scan(&c.id, &c.name, &c.email, &c.basis); err != nil {
+		if err := rows.Scan(&c.id, &c.name, &c.email, &c.deletionRequestedAt); err != nil {
 			log.Printf("cleanup phase3 scan: %v", err)
 			continue
 		}
@@ -207,7 +207,7 @@ func (h *CleanupHandler) phase3(ctx context.Context) {
 	}
 
 	for _, c := range candidates {
-		executesAt := time.Unix(c.basis+thirtyDays, 0)
+		executesAt := time.Unix(c.deletionRequestedAt+thirtyDays, 0)
 		go func(email, name string, execAt time.Time) {
 			if err := h.mailer.SendAccountDeletion(context.Background(), email, name,
 				"deletion_reminder", "en",
@@ -235,7 +235,7 @@ func (h *CleanupHandler) phase4(ctx context.Context) {
 		`SELECT id, name, email
 		 FROM users
 		 WHERE deletion_requested_at IS NOT NULL
-		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + $1::bigint <= $2::bigint`,
+		   AND deletion_requested_at + $1 <= $2`,
 		thirtyDays, now,
 	)
 	if err != nil {
@@ -264,16 +264,24 @@ func (h *CleanupHandler) phase4(ctx context.Context) {
 	}
 
 	for _, a := range accounts {
+		tag, err := h.db.Exec(ctx,
+			`DELETE FROM users WHERE id = $1 AND deletion_requested_at IS NOT NULL AND deletion_requested_at + $2 <= $3`,
+			a.id, thirtyDays, now,
+		)
+		if err != nil {
+			log.Printf("cleanup phase4 delete user %s: %v", a.id, err)
+			continue
+		}
+		if tag.RowsAffected() == 0 {
+			// User logged in and cancelled deletion since the SELECT — skip.
+			continue
+		}
+
 		if err := h.mailer.SendAccountDeletion(context.Background(), a.email, a.name,
 			"deletion_executed", "en",
 			mailer.AccountDeletionEmailData{},
 		); err != nil {
 			log.Printf("cleanup phase4 send confirmation to %s: %v", a.email, err)
-		}
-
-		if _, err := h.db.Exec(ctx, `DELETE FROM users WHERE id = $1`, a.id); err != nil {
-			log.Printf("cleanup phase4 delete user %s: %v", a.id, err)
-			continue
 		}
 
 		if ud, ok := h.billing.(billing.UserDeleter); ok {

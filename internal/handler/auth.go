@@ -282,7 +282,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	now := time.Now().Unix()
 	if _, err := h.db.Exec(ctx,
-		`UPDATE users SET last_login_at = $1, updated_at = $2 WHERE id = $3`,
+		`UPDATE users SET last_login_at = $1, updated_at = $2, deletion_requested_at = NULL, deletion_reminder_sent_at = NULL WHERE id = $3`,
 		now, now, user.ID,
 	); err != nil {
 		tokenHash := auth.HashRefreshToken(resp.RefreshToken)
@@ -703,21 +703,16 @@ func (h *AuthHandler) Me(c *gin.Context) {
 
 	var user model.User
 	var deletionRequestedAt *int64
-	var lastLoginAt *int64
 	err := h.db.QueryRow(ctx,
-		`SELECT id, name, email, is_verified, created_at, updated_at, deletion_requested_at, last_login_at FROM users WHERE id = $1`, userID,
-	).Scan(&user.ID, &user.Name, &user.Email, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt, &deletionRequestedAt, &lastLoginAt)
+		`SELECT id, name, email, is_verified, created_at, updated_at, deletion_requested_at FROM users WHERE id = $1`, userID,
+	).Scan(&user.ID, &user.Name, &user.Email, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt, &deletionRequestedAt)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
 	}
 
 	if deletionRequestedAt != nil {
-		basis := *deletionRequestedAt
-		if lastLoginAt != nil && *lastLoginAt > basis {
-			basis = *lastLoginAt
-		}
-		scheduled := basis + 30*24*60*60
+		scheduled := *deletionRequestedAt + 30*24*60*60
 		user.DeletionScheduledAt = &scheduled
 	}
 
