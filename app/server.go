@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
 	"github.com/TabSlate-dev/TabSlate-server/billing"
 	"github.com/TabSlate-dev/TabSlate-server/db"
 	"github.com/TabSlate-dev/TabSlate-server/internal/captcha"
@@ -18,6 +16,8 @@ import (
 	"github.com/TabSlate-dev/TabSlate-server/internal/mailer"
 	"github.com/TabSlate-dev/TabSlate-server/internal/middleware"
 	"github.com/TabSlate-dev/TabSlate-server/internal/search"
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
 )
 
 // Server is the HTTP server for the TabSlate backend.
@@ -54,11 +54,11 @@ func New(cfg *Config, database *db.DB, bp billing.Provider, ctx context.Context)
 
 	// Create mailer from config.
 	m := mailer.New(mailer.Config{
-		Provider:     cfg.MailProvider,
-		SMTPHost:     cfg.SMTPHost,
-		SMTPPort:     cfg.SMTPPort,
-		SMTPUser:     cfg.SMTPUser,
-		SMTPPassword: cfg.SMTPPassword,
+		Provider:       cfg.MailProvider,
+		SMTPHost:       cfg.SMTPHost,
+		SMTPPort:       cfg.SMTPPort,
+		SMTPUser:       cfg.SMTPUser,
+		SMTPPassword:   cfg.SMTPPassword,
 		SMTPFrom:       cfg.SMTPFrom,
 		ResendAPIKey:   cfg.ResendAPIKey,
 		ResendFrom:     cfg.ResendFrom,
@@ -104,7 +104,7 @@ func New(cfg *Config, database *db.DB, bp billing.Provider, ctx context.Context)
 	}
 	s.setupCORS()
 	s.setupRoutes()
-	cleanupH := handler.NewCleanupHandler(database, cfg.TrashGraceDays)
+	cleanupH := handler.NewCleanupHandler(database, cfg.TrashGraceDays, s.mailer, s.billing, s.search)
 	go cleanupH.Run(ctx)
 	return s
 }

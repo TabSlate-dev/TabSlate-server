@@ -5,7 +5,10 @@ import (
 	"log"
 	"time"
 
+	"github.com/TabSlate-dev/TabSlate-server/billing"
 	"github.com/TabSlate-dev/TabSlate-server/db"
+	"github.com/TabSlate-dev/TabSlate-server/internal/mailer"
+	"github.com/TabSlate-dev/TabSlate-server/internal/search"
 )
 
 // tombstoneWindowDays is the maximum expected delta-sync lag across devices.
@@ -20,10 +23,19 @@ const tombstoneWindowDays = 7
 type CleanupHandler struct {
 	db             *db.DB
 	trashGraceDays int
+	mailer         *mailer.Mailer
+	billing        billing.Provider
+	search         *search.Client
 }
 
-func NewCleanupHandler(d *db.DB, trashGraceDays int) *CleanupHandler {
-	return &CleanupHandler{db: d, trashGraceDays: trashGraceDays}
+func NewCleanupHandler(d *db.DB, trashGraceDays int, m *mailer.Mailer, bp billing.Provider, sc *search.Client) *CleanupHandler {
+	return &CleanupHandler{
+		db:             d,
+		trashGraceDays: trashGraceDays,
+		mailer:         m,
+		billing:        bp,
+		search:         sc,
+	}
 }
 
 // Run starts the cleanup loop. Call as a goroutine; exits when ctx is cancelled.
@@ -48,6 +60,8 @@ func (h *CleanupHandler) runOnce(ctx context.Context) {
 
 	h.phase1(ctx, nowMs, graceMs)
 	h.phase2(ctx, nowMs, graceMs, tombstoneMs)
+	h.phase3(ctx)
+	h.phase4(ctx)
 }
 
 // phase1 promotes state=1 items past the grace period to state=2.
@@ -147,5 +161,129 @@ func (h *CleanupHandler) phase2(ctx context.Context, nowMs, graceMs, tombstoneMs
 	if _, err := h.db.Exec(ctx,
 		`DELETE FROM groups WHERE is_deleted = 2 AND deleted_at < $1`, cutoff); err != nil {
 		log.Printf("cleanup phase2 groups: %v", err)
+	}
+}
+
+// phase3 sends the 3-day reminder email to users whose deletion is due within
+// 3 days and who haven't yet received the reminder.
+func (h *CleanupHandler) phase3(ctx context.Context) {
+	now := time.Now().Unix()
+	threeDays := int64(3 * 24 * 60 * 60)
+	thirtyDays := int64(30 * 24 * 60 * 60)
+
+	rows, err := h.db.Query(ctx,
+		`SELECT id, name, email, GREATEST(COALESCE(last_login_at, 0), deletion_requested_at)
+		 FROM users
+		 WHERE deletion_requested_at IS NOT NULL
+		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + $1::bigint > $2::bigint
+		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + $3::bigint <= $4::bigint + $5::bigint
+		   AND deletion_reminder_sent_at IS NULL`,
+		thirtyDays, now, thirtyDays, now, threeDays,
+	)
+	if err != nil {
+		log.Printf("cleanup phase3 query: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	type candidate struct {
+		id    string
+		name  string
+		email string
+		basis int64
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.id, &c.name, &c.email, &c.basis); err != nil {
+			log.Printf("cleanup phase3 scan: %v", err)
+			continue
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("cleanup phase3 rows err: %v", err)
+		return
+	}
+
+	for _, c := range candidates {
+		executesAt := time.Unix(c.basis+thirtyDays, 0)
+		go func(email, name string, execAt time.Time) {
+			if err := h.mailer.SendAccountDeletion(context.Background(), email, name,
+				"deletion_reminder", "en",
+				mailer.AccountDeletionEmailData{ExecutesAt: execAt},
+			); err != nil {
+				log.Printf("cleanup phase3 send reminder to %s: %v", email, err)
+			}
+		}(c.email, c.name, executesAt)
+
+		if _, err := h.db.Exec(ctx,
+			`UPDATE users SET deletion_reminder_sent_at = $1 WHERE id = $2`,
+			now, c.id,
+		); err != nil {
+			log.Printf("cleanup phase3 mark reminder sent for %s: %v", c.id, err)
+		}
+	}
+}
+
+// phase4 hard-deletes accounts whose 30-day grace period has elapsed.
+func (h *CleanupHandler) phase4(ctx context.Context) {
+	now := time.Now().Unix()
+	thirtyDays := int64(30 * 24 * 60 * 60)
+
+	rows, err := h.db.Query(ctx,
+		`SELECT id, name, email
+		 FROM users
+		 WHERE deletion_requested_at IS NOT NULL
+		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + $1::bigint <= $2::bigint`,
+		thirtyDays, now,
+	)
+	if err != nil {
+		log.Printf("cleanup phase4 query: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	type account struct {
+		id    string
+		name  string
+		email string
+	}
+	var accounts []account
+	for rows.Next() {
+		var a account
+		if err := rows.Scan(&a.id, &a.name, &a.email); err != nil {
+			log.Printf("cleanup phase4 scan: %v", err)
+			continue
+		}
+		accounts = append(accounts, a)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("cleanup phase4 rows err: %v", err)
+		return
+	}
+
+	for _, a := range accounts {
+		if err := h.mailer.SendAccountDeletion(context.Background(), a.email, a.name,
+			"deletion_executed", "en",
+			mailer.AccountDeletionEmailData{},
+		); err != nil {
+			log.Printf("cleanup phase4 send confirmation to %s: %v", a.email, err)
+		}
+
+		if _, err := h.db.Exec(ctx, `DELETE FROM users WHERE id = $1`, a.id); err != nil {
+			log.Printf("cleanup phase4 delete user %s: %v", a.id, err)
+			continue
+		}
+
+		if ud, ok := h.billing.(billing.UserDeleter); ok {
+			if err := ud.OnUserDeleted(context.Background(), a.id); err != nil {
+				log.Printf("cleanup phase4 billing OnUserDeleted %s: %v", a.id, err)
+			}
+		}
+
+		h.search.DeleteUserDocumentsAsync(a.id)
+
+		log.Printf("cleanup phase4: deleted account %s (%s)", a.id, a.email)
 	}
 }
