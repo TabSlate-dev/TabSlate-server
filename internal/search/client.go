@@ -126,6 +126,20 @@ func (c *Client) DeleteBookmark(id string) {
 	}()
 }
 
+// DeleteUserDocumentsAsync removes all indexed bookmarks belonging to a user.
+// Fire-and-forget goroutine. Nil-safe (no-op when search is disabled).
+func (c *Client) DeleteUserDocumentsAsync(userID string) {
+	if c == nil {
+		return
+	}
+	go func() {
+		filter := fmt.Sprintf(`userId = "%s"`, userID)
+		if _, err := c.index.DeleteDocumentsByFilterWithContext(context.Background(), filter, nil); err != nil {
+			log.Printf("[search] deleteUserDocuments %s: %v", userID, err)
+		}
+	}()
+}
+
 // SearchBookmarks queries the index filtered to a single user.
 func (c *Client) SearchBookmarks(userID, query string) ([]BookmarkDoc, error) {
 	if c == nil {

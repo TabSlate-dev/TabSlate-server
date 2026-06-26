@@ -184,3 +184,8 @@ INSERT INTO subscription_capacity
     (plan_code, plan_id, max_workspaces, max_bookmarks, max_collections, max_tags, max_saved_groups, trash_grace_days)
 VALUES ('unlimited', '', -1, -1, -1, -1, -1, -1)
 ON CONFLICT (plan_code) DO NOTHING;
+
+-- Account deletion grace period
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at             BIGINT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS deletion_requested_at     BIGINT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS deletion_reminder_sent_at BIGINT;

@@ -61,3 +61,8 @@ func TestPing_CanceledContext(t *testing.T) {
 		t.Errorf("canceled Ping: expected wrapped context.Canceled, got %v", err)
 	}
 }
+
+func TestDeleteUserDocumentsAsync_NilSafe(t *testing.T) {
+	var c *Client
+	c.DeleteUserDocumentsAsync("any-user-id")
+}
