@@ -230,23 +230,53 @@ Extend the `User` type with `deletion_scheduled_at?: number | null`. The Account
 
 ## Section 5: Legal Document Updates (Post-Implementation)
 
-After the feature is shipped, update `TabSlate-Landing/src/messages/en.json` (and the `zh.json` counterpart) in three places:
+After the feature is shipped, update both `TabSlate-Landing/src/messages/en.json` and `src/messages/zh.json` in three places each:
 
-### Privacy Policy — Data Storage / Data Retention
+### 1. Privacy Policy — Data Storage / Data Retention
 
-Current text instructs users to email `privacy@cs.tabslate.com` for deletion. Replace with a description of the self-service flow:
+**en.json** (`privacy.dataStorage.content` — "3. Data Retention" paragraph):
+
+Replace the sentence beginning "To permanently delete your account…submit a deletion request to privacy@cs.tabslate.com" with:
 
 > You can permanently delete your account directly from the TabSlate extension: open **Settings → Account → Delete Account**, confirm with your password, and a 30-day grace period begins. During this window you may cancel the deletion at any time simply by logging in again — no action required beyond signing in. After 30 days without a login, your account and all associated cloud data (synced tabs, bookmarks, workspaces, collections, tags, and account information) are permanently purged from our databases. Three email notifications are sent: one immediately upon request, one reminder 3 days before the deadline, and one confirmation after deletion is complete.
 
-### Privacy Policy — Your Rights (Right to Deletion)
+**zh.json** (`privacy.dataStorage.content` — "3. 数据保留" 段落):
 
-Same update as above — replace the manual email flow with the self-service account deletion description. Keep the `privacy@cs.tabslate.com` contact for data export requests and edge cases (e.g. users who cannot log in).
+将"如需永久删除账户及所有关联云端数据，请向 privacy@cs.tabslate.com 提交删除申请——我们将在核实您的身份与意愿后的 30 天内，手动处理请求并永久清除所有相关数据"替换为：
 
-### Terms of Service — Account Closure
+> 您可直接在 TabSlate 扩展中自助注销账户：前往**设置 → 账户 → 注销账户**，输入当前密码确认后，30 天宽限期随即开始。在此期间，您只需重新登录，即可随时取消注销申请——无需任何其他操作。若 30 天内未登录，您的账户及所有关联云端数据（已同步的标签页、书签、工作区、收藏集、标签及账户信息）将从我们的数据库中永久清除。整个过程中，系统会发送三封邮件通知：申请提交时、到期前 3 天提醒时，以及注销完成后。
 
-Current text implies immediate purge on closure. Update to reflect the 30-day grace period:
+---
+
+### 2. Privacy Policy — Your Rights (Right to Deletion)
+
+**en.json** (`privacy.userRights.content` — "Correction and Deletion" bullet):
+
+Replace the sentence beginning "To permanently delete your account…submit a deletion request to privacy@cs.tabslate.com" with:
+
+> **Correction and Deletion:** You can request rectification of inaccurate data. To permanently delete your account and all associated cloud data, use the self-service **Settings → Account → Delete Account** flow in the extension: confirm with your password, and your account will be scheduled for deletion after a 30-day grace period during which you can cancel by simply logging in. For edge cases where you are unable to log in, contact us at privacy@cs.tabslate.com.
+
+**zh.json** (`privacy.userRights.content` — "更正与删除权" 条目):
+
+将"如需永久删除账户及所有关联云端数据，请向 privacy@cs.tabslate.com 提交删除申请。我们将手动处理您的请求，并在核实您的身份与意愿后的 30 日内，永久清除所有关联数据，包括已同步的标签页、书签、工作区及账户信息"替换为：
+
+> **更正与删除权：** 您可申请更正不准确的数据。如需永久删除账户及所有关联云端数据，请使用扩展内的自助注销功能：前往**设置 → 账户 → 注销账户**，输入密码确认后，账户将在 30 天宽限期后被删除，宽限期内登录即可取消。如因特殊情况无法登录，请通过 privacy@cs.tabslate.com 联系我们。
+
+---
+
+### 3. Terms of Service — Account Closure
+
+**en.json** (`terms.termination.content` — second paragraph beginning "You may close your account"):
+
+Replace with:
 
 > You may close your account at any time via **Settings → Account → Delete Account** in the extension. Upon submitting a deletion request, a 30-day grace period begins during which all your data remains intact. Logging in at any point during this window cancels the request. After 30 days without a login, all associated bookmarks, workspaces, tab groups, and account information stored on our synchronization servers will be permanently and irreversibly purged.
+
+**zh.json** (`terms.termination.content` — 第二段"您可随时主动关闭账户"):
+
+替换为：
+
+> 您可随时在扩展的**设置 → 账户 → 注销账户**中主动关闭账户。提交注销申请后，将进入 30 天宽限期，期间您的所有数据保持完好。在此期间登录即可取消申请。若 30 天内未登录，存储在我们同步服务器上的所有关联书签、工作区、标签页分组及账户信息将被永久且不可逆地从数据库中清除。
 
 ---
 
