@@ -1,0 +1,87 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html dir="ltr" lang="en">
+  <head>
+    <meta content="text/html; charset=UTF-8" http-equiv="Content-Type" />
+    <meta name="x-apple-disable-message-reformatting" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="supported-color-schemes" content="light dark" />
+    <style>
+      @media(prefers-color-scheme:dark){.dark_bg{background-color:rgb(10,10,10) !important}.dark_text{color:rgb(250,250,250) !important}.dark_muted{color:rgb(212,212,212) !important}}
+    </style>
+  </head>
+  <body class="dark_bg dark_text" style="background-color:rgb(255,255,255);color:rgb(10,10,10)">
+    <!--$-->
+    <table border="0" width="100%" cellpadding="0" cellspacing="0" role="presentation" align="center">
+      <tbody>
+        <tr>
+          <td style="background-color:rgb(255,255,255);color:rgb(10,10,10)">
+            <table align="center" width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation"
+              style="max-width:600px;padding-left:0;padding-right:0">
+              <tbody>
+                <tr style="width:100%">
+                  <td>
+                    <!-- Logo -->
+                    <table border="0" cellpadding="0" cellspacing="0" role="presentation">
+                      <tr>
+                        <td>
+                          <img alt="TabSlate" src="https://tabslate.com/logo.svg"
+                            style="height:32px;width:auto;display:block;outline:none;border:none;text-decoration:none" />
+                        </td>
+                        <td style="padding-left:8px;font-size:20px;font-weight:700;vertical-align:middle;">TabSlate</td>
+                      </tr>
+                    </table>
+                    <!-- Heading + Greeting -->
+                    <div style="padding-top:16px;padding-bottom:2px;padding-left:4px;padding-right:4px;text-align:left">
+                      <h1 style="font-size:36px;line-height:36px;font-weight:800;letter-spacing:-0.4px;margin:0;padding:0">
+                        <span style="font-weight:700">{{.Heading}}</span>
+                      </h1>
+                      <p style="font-size:18px;line-height:28px;margin:8px 0 0 0;">Hi {{.Name}},</p>
+                    </div>
+                    <!-- Body -->
+                    <div style="padding-top:3px;padding-bottom:3px;text-align:left">
+                      <p style="font-size:16px;line-height:28px;margin:8px;padding:0;white-space:pre-line">{{.Intro}}</p>
+                    </div>
+                    <!-- Spacer -->
+                    <div style="padding-top:3px;padding-bottom:3px;">
+                      <p style="font-size:16px;line-height:1.75;margin:0;padding:0;">&nbsp;</p>
+                    </div>
+                    <!-- Note -->
+                    <div style="padding-top:3px;padding-bottom:3px;text-align:left">
+                      <p style="font-size:14px;line-height:20px;margin:0;padding:0;">
+                        <span>{{.Note}}</span>
+                      </p>
+                    </div>
+                    <hr style="width:100%;border:none;border-top:1px solid #eaeaea" />
+                    <!-- Footer logo -->
+                    <table border="0" cellpadding="0" cellspacing="0" role="presentation">
+                      <tr>
+                        <td>
+                          <img alt="TabSlate" src="https://tabslate.com/logo.svg"
+                            style="height:24px;width:auto;display:block;outline:none;border:none;text-decoration:none" />
+                        </td>
+                        <td style="padding-left:6px;font-size:14px;font-weight:700;vertical-align:middle;">TabSlate</td>
+                      </tr>
+                    </table>
+                    <div style="padding-top:8px;padding-bottom:3px;text-align:left">
+                      <p style="font-size:14px;line-height:20px;margin:0;padding:0;">
+                        <a href="{{.PrivacyURL}}" style="color:rgb(115,115,115);text-decoration:underline;">{{.PrivacyText}}</a>
+                        <span class="dark_muted" style="color:rgb(115,115,115);padding:0 6px;">·</span>
+                        <a href="{{.TermsURL}}" style="color:rgb(115,115,115);text-decoration:underline;">{{.TermsText}}</a>
+                      </p>
+                    </div>
+                    <div style="padding-top:8px;padding-bottom:3px;text-align:left">
+                      <p style="font-size:14px;line-height:20px;margin:0;padding:0;">
+                        <span class="dark_muted" style="color:rgb(115,115,115);">©2026 TabSlate. All rights reserved.</span>
+                      </p>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <!--7--><!--/$-->
+  </body>
+</html>

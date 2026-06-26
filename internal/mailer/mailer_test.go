@@ -5,6 +5,7 @@ import (
 	"html/template"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRenderOTP_ContainsInjectedValues(t *testing.T) {
@@ -188,5 +189,57 @@ func TestRenderOTPRejectsUnknownPurpose(t *testing.T) {
 
 	if _, _, err := m.renderOTP("Bob", "654321", "magic", "en"); err == nil {
 		t.Fatal("renderOTP returned nil error for unknown purpose")
+	}
+}
+
+func TestRenderAccountDeletion_RequestedContainsDate(t *testing.T) {
+	m := New(Config{})
+	executes := time.Date(2026, 7, 26, 0, 0, 0, 0, time.UTC)
+
+	subject, body, err := m.renderAccountDeletion("Alice", "deletion_requested", "en", AccountDeletionEmailData{ExecutesAt: executes})
+	if err != nil {
+		t.Fatalf("renderAccountDeletion: %v", err)
+	}
+	if subject != "Your TabSlate account deletion is scheduled" {
+		t.Errorf("unexpected subject: %q", subject)
+	}
+	for _, want := range []string{"Alice", "July 26, 2026", "log in", "Privacy Policy"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+}
+
+func TestRenderAccountDeletion_ReminderZhContainsDate(t *testing.T) {
+	m := New(Config{})
+	executes := time.Date(2026, 7, 26, 0, 0, 0, 0, time.UTC)
+
+	_, body, err := m.renderAccountDeletion("李明", "deletion_reminder", "zh", AccountDeletionEmailData{ExecutesAt: executes})
+	if err != nil {
+		t.Fatalf("renderAccountDeletion zh: %v", err)
+	}
+	for _, want := range []string{"李明", "July 26, 2026", "隐私政策"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+}
+
+func TestRenderAccountDeletion_ExecutedNoDate(t *testing.T) {
+	m := New(Config{})
+	_, body, err := m.renderAccountDeletion("Bob", "deletion_executed", "en", AccountDeletionEmailData{})
+	if err != nil {
+		t.Fatalf("renderAccountDeletion executed: %v", err)
+	}
+	if strings.Contains(body, "%s") {
+		t.Error("body contains unreplaced placeholder token")
+	}
+}
+
+func TestRenderAccountDeletion_UnknownPurpose(t *testing.T) {
+	m := New(Config{})
+	_, _, err := m.renderAccountDeletion("Bob", "unknown_purpose", "en", AccountDeletionEmailData{})
+	if err == nil {
+		t.Fatal("expected error for unknown purpose, got nil")
 	}
 }
