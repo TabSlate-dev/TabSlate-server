@@ -27,3 +27,6 @@ go.work.sum
 
 # Mac trash file
 .DS_Store
+
+# Superpowers plans/specs (local dev tooling, not part of the codebase)
+docs/superpowers/
