@@ -793,13 +793,13 @@ func (h *CleanupHandler) phase3(ctx context.Context) {
 	thirtyDays := int64(30 * 24 * 60 * 60)
 
 	rows, err := h.db.Query(ctx,
-		`SELECT id, name, email, GREATEST(COALESCE(last_login_at, 0), deletion_requested_at)
+		h.db.Rebind(`SELECT id, name, email, GREATEST(COALESCE(last_login_at, 0), deletion_requested_at)
 		 FROM users
 		 WHERE deletion_requested_at IS NOT NULL
-		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + $1 > $2
-		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + $1 <= $2 + $3
-		   AND deletion_reminder_sent_at IS NULL`,
-		thirtyDays, now, threeDays,
+		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + ? > ?
+		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + ? <= ? + ?
+		   AND deletion_reminder_sent_at IS NULL`),
+		thirtyDays, now, thirtyDays, now, threeDays,
 	)
 	if err != nil {
 		log.Printf("cleanup phase3 query: %v", err)
@@ -837,7 +837,7 @@ func (h *CleanupHandler) phase3(ctx context.Context) {
 		}(c.email, c.name, executesAt)
 
 		if _, err := h.db.Exec(ctx,
-			`UPDATE users SET deletion_reminder_sent_at = $1 WHERE id = $2`,
+			h.db.Rebind(`UPDATE users SET deletion_reminder_sent_at = ? WHERE id = ?`),
 			now, c.id,
 		); err != nil {
 			log.Printf("cleanup phase3 mark reminder sent for %s: %v", c.id, err)
@@ -857,10 +857,10 @@ func (h *CleanupHandler) phase4(ctx context.Context) {
 	thirtyDays := int64(30 * 24 * 60 * 60)
 
 	rows, err := h.db.Query(ctx,
-		`SELECT id, name, email
+		h.db.Rebind(`SELECT id, name, email
 		 FROM users
 		 WHERE deletion_requested_at IS NOT NULL
-		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + $1 <= $2`,
+		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + ? <= ?`),
 		thirtyDays, now,
 	)
 	if err != nil {
@@ -895,7 +895,7 @@ func (h *CleanupHandler) phase4(ctx context.Context) {
 		}
 
 		// 2. Hard delete — cascades to all child tables.
-		if _, err := h.db.Exec(ctx, `DELETE FROM users WHERE id = $1`, a.id); err != nil {
+		if _, err := h.db.Exec(ctx, h.db.Rebind(`DELETE FROM users WHERE id = ?`), a.id); err != nil {
 			log.Printf("cleanup phase4 delete user %s: %v", a.id, err)
 			continue
 		}
