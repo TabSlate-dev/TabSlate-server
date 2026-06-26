@@ -10,27 +10,50 @@ Go backend for the TabSlate Chrome extension. Released under **AGPL-3.0**.
 go build -o tabslate-server ./cmd/server
 ```
 
-Docker:
+## Deployment
 
-```bash
-docker build -t tabslate-server .
-```
+The easiest way to self-host TabSlate Server is using Docker Compose. The official image is automatically built and published to the GitHub Container Registry (`ghcr.io`).
+
+1. Download the `docker-compose.yml` and `.env.example` files:
+   ```bash
+   curl -O https://raw.githubusercontent.com/TabSlate-dev/TabSlate-server/main/docker-compose.yml
+   curl -o .env https://raw.githubusercontent.com/TabSlate-dev/TabSlate-server/main/.env.example
+   ```
+
+2. Edit the `.env` file and configure the environment variables (see [Dependencies & Environment Variables](#dependencies--environment-variables)).
+
+3. Start the server:
+   ```bash
+   docker-compose up -d
+   ```
 
 ---
 
-## Runtime Environment Variables
+## Dependencies & Environment Variables
 
-| Variable | Required | Description |
+### Required Dependencies
+* **PostgreSQL (17+)**: The primary database. You can use an external provider (like Supabase/Neon) or host your own.
+  * `DATABASE_URL`: Your Postgres connection string (`postgres://...`)
+* `JWT_SECRET`: A secure random string used to sign access tokens. Generate one using `openssl rand -hex 32`.
+
+### Optional Dependencies
+* **Redis**: Used for pub/sub (real-time sync across instances) and rate limiting. Without Redis, the server falls back to in-memory mode, which works perfectly for single-node deployments.
+  * `REDIS_URL`: Redis connection string (`redis://...`)
+* **Email Provider**: Required if you want users to verify their email addresses or reset passwords via OTP. You can use `smtp`, `resend`, or `ses`.
+  * `MAIL_PROVIDER`: Set to your preferred provider. Leave empty to auto-verify all new registrations.
+* **MeiliSearch**: Provides powerful full-text search capabilities for bookmarks.
+  * `MEILISEARCH_HOST` and `MEILISEARCH_API_KEY`.
+* **Prosopo CAPTCHA**: Used for bot protection during registration and login.
+  * `PROSOPO_SECRET`.
+
+### Other Configuration
+| Variable | Description | Default |
 |---|---|---|
-| `DATABASE_URL` | ✅ | PostgreSQL DSN (`postgres://...`) |
-| `JWT_SECRET` | ✅ | HMAC secret for access tokens |
-| `PORT` | | HTTP port (default `8080`) |
-| `GIN_MODE` | | Gin mode: `release` / `debug` (default `debug`) |
-| `ALLOW_REGISTRATION` | | Set to `false` to disable new user registration (default `true`) |
-| `PROSOPO_SECRET` | | Captcha secret; omit to disable captcha |
-| `MAIL_PROVIDER` | | `smtp` / `resend` / `ses`; omit to auto-verify all registrations |
+| `PORT` | HTTP port the server listens on. | `8080` |
+| `GIN_MODE` | Gin framework mode: `release` or `debug`. | `debug` |
+| `ALLOW_REGISTRATION` | Set to `false` to disable new user signups. | `true` |
 
-See `.env.example` for the full list including SMTP, Resend, SES, and rate-limit tunables.
+For the complete list of tunable parameters (such as rate limits and specific mail provider configurations), see the [`.env.example`](.env.example) file.
 
 ---
 
@@ -44,8 +67,8 @@ option) any later version.
 > [!WARNING]
 > **COMMERCIAL USE RESTRICTION / 禁止商用声明**
 > 
-> **English**: You may **not** use this software (or any modified version thereof) to operate a paid commercial synchronization service, cloud service, SaaS, or any similar service offered to third parties for a fee, without obtaining a separate commercial license from TabSlate. Free self-hosting for personal or internal business use is fully permitted.
+> **English**: You may **not** use this software (or any modified version thereof) to operate a paid commercial synchronization service, cloud service, SaaS, or any similar service offered to third parties for a fee, without obtaining a separate commercial license from TabSlate. Free self-hosting for personal use is fully permitted.
 > 
-> **中文**: 未经 TabSlate 官方单独的商业授权，**严禁**将本软件（或其任何修改版本）用于提供向第三方收费的商业同步服务、云服务或 SaaS。完全允许个人或企业进行免费的私有化部署和内部使用。
+> **中文**: 未经 TabSlate 官方单独的商业授权，**严禁**将本软件（或其任何修改版本）用于提供向第三方收费的商业同步服务、云服务或 SaaS。完全允许个人进行免费的私有化部署和内部使用。
 
 See the [LICENSE](LICENSE) file for the full AGPL-3.0 text and the commercial restriction addendum.
