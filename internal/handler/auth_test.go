@@ -56,3 +56,18 @@ func TestRegister_registrationClosed(t *testing.T) {
 		t.Errorf("unexpected error: %q", resp["error"])
 	}
 }
+
+func TestDeleteAccount_MissingPassword(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/delete-account", strings.NewReader(`{}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h := &AuthHandler{}
+	h.DeleteAccount(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}

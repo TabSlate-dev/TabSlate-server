@@ -271,6 +271,10 @@ func (s *Server) setupRoutes() {
 		api.DELETE("/tags/:id", tagH.Delete)
 
 		api.POST("/auth/sse-token", authH.IssueSSEToken)
+		api.POST("/auth/delete-account",
+			middleware.RateLimitByIP(s.infra.Limiter, s.cfg.RateLimitAuth, s.cfg.RateLimitAuthWindow),
+			authH.DeleteAccount,
+		)
 
 		api.POST("/sync/push", func(c *gin.Context) {
 			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 512*1024)
