@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- All DB queries use `h.db.Rebind(query)` with `?` placeholders — never `$N` directly.
+- All DB queries use PostgreSQL native `$N` placeholders directly — pgxpool does not have a `Rebind` method and does not accept `?`.
 - All DB queries pass `c.Request.Context()` (or a `context.Context` arg) — never context-free variants.
 - Multi-step writes use `BEGIN`/`COMMIT` transactions with `defer tx.Rollback()`.
 - No string-concat SQL — parameterised queries only.
@@ -545,7 +545,7 @@ In `internal/handler/auth.go`, in `AuthHandler.Login`, locate the line that call
 ```go
 now := time.Now().Unix()
 h.db.Exec(ctx,
-	h.db.Rebind(`UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?`),
+	`UPDATE users SET last_login_at = $1, updated_at = $2 WHERE id = $3`,
 	now, now, user.ID,
 )
 ```
@@ -560,7 +560,7 @@ In `AuthHandler.Me`, replace the SELECT query and Scan to also fetch `deletion_r
 var deletionRequestedAt *int64
 var lastLoginAt *int64
 err := h.db.QueryRow(ctx,
-	h.db.Rebind(`SELECT id, name, email, is_verified, created_at, updated_at, deletion_requested_at, last_login_at FROM users WHERE id = ?`), userID,
+	`SELECT id, name, email, is_verified, created_at, updated_at, deletion_requested_at, last_login_at FROM users WHERE id = $1`, userID,
 ).Scan(&user.ID, &user.Name, &user.Email, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt, &deletionRequestedAt, &lastLoginAt)
 ```
 
@@ -598,7 +598,7 @@ func (h *AuthHandler) DeleteAccount(c *gin.Context) {
 	var deletionRequestedAt *int64
 	var lastLoginAt *int64
 	if err := h.db.QueryRow(ctx,
-		h.db.Rebind(`SELECT id, name, email, password_hash, deletion_requested_at, last_login_at FROM users WHERE id = ?`),
+		`SELECT id, name, email, password_hash, deletion_requested_at, last_login_at FROM users WHERE id = $1`,
 		userID,
 	).Scan(&user.ID, &user.Name, &user.Email, &user.PasswordHash, &deletionRequestedAt, &lastLoginAt); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch user"})
@@ -628,7 +628,7 @@ func (h *AuthHandler) DeleteAccount(c *gin.Context) {
 	}
 
 	if _, err := h.db.Exec(ctx,
-		h.db.Rebind(`UPDATE users SET deletion_requested_at = ?, deletion_reminder_sent_at = NULL, updated_at = ? WHERE id = ?`),
+		`UPDATE users SET deletion_requested_at = $1, deletion_reminder_sent_at = NULL, updated_at = $2 WHERE id = $3`,
 		now, now, userID,
 	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to schedule deletion"})
@@ -793,13 +793,13 @@ func (h *CleanupHandler) phase3(ctx context.Context) {
 	thirtyDays := int64(30 * 24 * 60 * 60)
 
 	rows, err := h.db.Query(ctx,
-		h.db.Rebind(`SELECT id, name, email, GREATEST(COALESCE(last_login_at, 0), deletion_requested_at)
+		`SELECT id, name, email, GREATEST(COALESCE(last_login_at, 0), deletion_requested_at)
 		 FROM users
 		 WHERE deletion_requested_at IS NOT NULL
-		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + ? > ?
-		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + ? <= ? + ?
-		   AND deletion_reminder_sent_at IS NULL`),
-		thirtyDays, now, thirtyDays, now, threeDays,
+		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + $1 > $2
+		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + $1 <= $2 + $3
+		   AND deletion_reminder_sent_at IS NULL`,
+		thirtyDays, now, threeDays,
 	)
 	if err != nil {
 		log.Printf("cleanup phase3 query: %v", err)
@@ -837,7 +837,7 @@ func (h *CleanupHandler) phase3(ctx context.Context) {
 		}(c.email, c.name, executesAt)
 
 		if _, err := h.db.Exec(ctx,
-			h.db.Rebind(`UPDATE users SET deletion_reminder_sent_at = ? WHERE id = ?`),
+			`UPDATE users SET deletion_reminder_sent_at = $1 WHERE id = $2`,
 			now, c.id,
 		); err != nil {
 			log.Printf("cleanup phase3 mark reminder sent for %s: %v", c.id, err)
@@ -857,10 +857,10 @@ func (h *CleanupHandler) phase4(ctx context.Context) {
 	thirtyDays := int64(30 * 24 * 60 * 60)
 
 	rows, err := h.db.Query(ctx,
-		h.db.Rebind(`SELECT id, name, email
+		`SELECT id, name, email
 		 FROM users
 		 WHERE deletion_requested_at IS NOT NULL
-		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + ? <= ?`),
+		   AND GREATEST(COALESCE(last_login_at, 0), deletion_requested_at) + $1 <= $2`,
 		thirtyDays, now,
 	)
 	if err != nil {
@@ -895,7 +895,7 @@ func (h *CleanupHandler) phase4(ctx context.Context) {
 		}
 
 		// 2. Hard delete — cascades to all child tables.
-		if _, err := h.db.Exec(ctx, h.db.Rebind(`DELETE FROM users WHERE id = ?`), a.id); err != nil {
+		if _, err := h.db.Exec(ctx, `DELETE FROM users WHERE id = $1`, a.id); err != nil {
 			log.Printf("cleanup phase4 delete user %s: %v", a.id, err)
 			continue
 		}
