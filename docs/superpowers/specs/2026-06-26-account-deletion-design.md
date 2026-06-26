@@ -226,6 +226,30 @@ Extend the `User` type with `deletion_scheduled_at?: number | null`. The Account
 
 ---
 
+---
+
+## Section 5: Legal Document Updates (Post-Implementation)
+
+After the feature is shipped, update `TabSlate-Landing/src/messages/en.json` (and the `zh.json` counterpart) in three places:
+
+### Privacy Policy — Data Storage / Data Retention
+
+Current text instructs users to email `privacy@cs.tabslate.com` for deletion. Replace with a description of the self-service flow:
+
+> You can permanently delete your account directly from the TabSlate extension: open **Settings → Account → Delete Account**, confirm with your password, and a 30-day grace period begins. During this window you may cancel the deletion at any time simply by logging in again — no action required beyond signing in. After 30 days without a login, your account and all associated cloud data (synced tabs, bookmarks, workspaces, collections, tags, and account information) are permanently purged from our databases. Three email notifications are sent: one immediately upon request, one reminder 3 days before the deadline, and one confirmation after deletion is complete.
+
+### Privacy Policy — Your Rights (Right to Deletion)
+
+Same update as above — replace the manual email flow with the self-service account deletion description. Keep the `privacy@cs.tabslate.com` contact for data export requests and edge cases (e.g. users who cannot log in).
+
+### Terms of Service — Account Closure
+
+Current text implies immediate purge on closure. Update to reflect the 30-day grace period:
+
+> You may close your account at any time via **Settings → Account → Delete Account** in the extension. Upon submitting a deletion request, a 30-day grace period begins during which all your data remains intact. Logging in at any point during this window cancels the request. After 30 days without a login, all associated bookmarks, workspaces, tab groups, and account information stored on our synchronization servers will be permanently and irreversibly purged.
+
+---
+
 ## Scope Boundaries
 
 - MeiliSearch cleanup on deletion: Phase 4 calls `search.DeleteUserDocuments(userID)` if the search client is configured. This needs a new method on `search.Client`.
