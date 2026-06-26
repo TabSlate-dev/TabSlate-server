@@ -117,3 +117,80 @@ ok  	github.com/TabSlate-dev/TabSlate-server/internal/handler	0.469s
 
 - No functional blockers found.
 - Minor concern: the task brief said to use `h.db.Rebind(...)` for new SQL, but this repository state does not provide that method, so I used the live codebase’s existing parameter style to keep the build green.
+
+---
+
+## Fix pass: review findings follow-up
+
+### Scope fixed
+
+- `AuthHandler.Login` no longer ignores `last_login_at` update failures.
+- `AuthHandler.Login` now updates `last_login_at` only after token issuance succeeds, so a failed login response does not extend account-deletion grace periods.
+- `internal/handler/auth_test.go` now covers:
+  - a successful `DeleteAccount` scheduling path
+  - `Me` deriving `deletion_scheduled_at` from the later of `deletion_requested_at` and `last_login_at`
+  - both reviewed `Login` edge cases above
+
+### TDD evidence
+
+#### RED
+
+Command:
+
+```bash
+TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55432/tabslate_test?sslmode=disable \
+go test ./internal/handler/... -run 'Test(Login_ReturnsErrorWhenLastLoginUpdateFails|Login_DoesNotUpdateLastLoginAtWhenTokenIssuanceFails|DeleteAccount_SchedulesDeletionForValidPassword|Me_DerivesDeletionScheduledAtFromLatestDeletionOrLogin)' -v
+```
+
+Output excerpt:
+
+```text
+=== RUN   TestLogin_ReturnsErrorWhenLastLoginUpdateFails
+    auth_test.go:106: expected 500, got 200 body={"user":{"id":"...","name":"Test User","email":"update-fails@example.com","is_verified":true,"created_at":1782492226,"updated_at":1782492226,"deletion_scheduled_at":null},"access_token":"...","refresh_token":"..."}
+--- FAIL: TestLogin_ReturnsErrorWhenLastLoginUpdateFails (0.25s)
+=== RUN   TestLogin_DoesNotUpdateLastLoginAtWhenTokenIssuanceFails
+    auth_test.go:147: expected last_login_at to remain NULL, got 1782492226
+--- FAIL: TestLogin_DoesNotUpdateLastLoginAtWhenTokenIssuanceFails (0.25s)
+```
+
+These failures matched the review findings exactly:
+- login still succeeded when the `last_login_at` update failed
+- login mutated `last_login_at` before refresh-token persistence had succeeded
+
+#### GREEN
+
+Command:
+
+```bash
+TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55432/tabslate_test?sslmode=disable \
+go test ./internal/handler/... -run 'Test(Login_ReturnsErrorWhenLastLoginUpdateFails|Login_DoesNotUpdateLastLoginAtWhenTokenIssuanceFails|DeleteAccount_SchedulesDeletionForValidPassword|Me_DerivesDeletionScheduledAtFromLatestDeletionOrLogin)' -v
+```
+
+Output:
+
+```text
+=== RUN   TestLogin_ReturnsErrorWhenLastLoginUpdateFails
+--- PASS: TestLogin_ReturnsErrorWhenLastLoginUpdateFails (0.27s)
+=== RUN   TestLogin_DoesNotUpdateLastLoginAtWhenTokenIssuanceFails
+--- PASS: TestLogin_DoesNotUpdateLastLoginAtWhenTokenIssuanceFails (0.24s)
+=== RUN   TestDeleteAccount_SchedulesDeletionForValidPassword
+--- PASS: TestDeleteAccount_SchedulesDeletionForValidPassword (0.22s)
+=== RUN   TestMe_DerivesDeletionScheduledAtFromLatestDeletionOrLogin
+--- PASS: TestMe_DerivesDeletionScheduledAtFromLatestDeletionOrLogin (0.13s)
+PASS
+ok  	github.com/TabSlate-dev/TabSlate-server/internal/handler	1.318s
+```
+
+### Final verification
+
+- `TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55432/tabslate_test?sslmode=disable go test ./internal/handler/... -v`
+  - PASS
+- `go build ./...`
+  - PASS
+- `go vet ./...`
+  - PASS
+
+### Notes
+
+- The new handler integration tests use a real PostgreSQL schema and skip unless `TEST_DATABASE_URL` is set.
+- I kept the fix pass within the task-owned auth files plus this report update; the unrelated `b491f52` docs/config change at `HEAD` was left untouched.

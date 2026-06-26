@@ -12,8 +12,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/TabSlate-dev/TabSlate-server/billing"
 	"github.com/TabSlate-dev/TabSlate-server/db"
 	"github.com/TabSlate-dev/TabSlate-server/internal/auth"
@@ -23,6 +21,8 @@ import (
 	"github.com/TabSlate-dev/TabSlate-server/internal/model"
 	"github.com/TabSlate-dev/TabSlate-server/internal/ratelimit"
 	"github.com/TabSlate-dev/TabSlate-server/internal/store"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 const (
@@ -274,15 +274,22 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		}
 	}
 
-	now := time.Now().Unix()
-	h.db.Exec(ctx,
-		`UPDATE users SET last_login_at = $1, updated_at = $2 WHERE id = $3`,
-		now, now, user.ID,
-	)
-
 	resp, err := h.issueTokens(&user)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue tokens"})
+		return
+	}
+
+	now := time.Now().Unix()
+	if _, err := h.db.Exec(ctx,
+		`UPDATE users SET last_login_at = $1, updated_at = $2 WHERE id = $3`,
+		now, now, user.ID,
+	); err != nil {
+		tokenHash := auth.HashRefreshToken(resp.RefreshToken)
+		if _, cleanupErr := h.db.Exec(ctx, `DELETE FROM refresh_tokens WHERE token_hash = $1`, tokenHash); cleanupErr != nil {
+			log.Printf("cleanup refresh token after last_login_at failure for user %s: %v", user.ID, cleanupErr)
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update last login"})
 		return
 	}
 	c.JSON(http.StatusOK, resp)
