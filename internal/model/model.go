@@ -16,10 +16,11 @@ type User struct {
 	Email      string `json:"email"`
 	IsVerified bool   `json:"is_verified"`
 
-	PasswordHash string `json:"-"`
-	CreatedAt    int64  `json:"created_at"`
-	UpdatedAt    int64  `json:"updated_at"`
-	SuspendedAt  *int64 `json:"-"`
+	PasswordHash        string `json:"-"`
+	CreatedAt           int64  `json:"created_at"`
+	UpdatedAt           int64  `json:"updated_at"`
+	SuspendedAt         *int64 `json:"-"`
+	DeletionScheduledAt *int64 `json:"deletion_scheduled_at"`
 }
 
 // Subscription holds a user's plan info.
@@ -164,6 +165,11 @@ type AuthResponse struct {
 
 type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token" binding:"required"`
+}
+
+// DeleteAccountRequest is the body for POST /auth/delete-account.
+type DeleteAccountRequest struct {
+	Password string `json:"password" binding:"required"`
 }
 
 type WorkspaceRequest struct {

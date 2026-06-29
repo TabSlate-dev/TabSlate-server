@@ -12,8 +12,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/TabSlate-dev/TabSlate-server/billing"
 	"github.com/TabSlate-dev/TabSlate-server/db"
 	"github.com/TabSlate-dev/TabSlate-server/internal/auth"
@@ -23,6 +21,8 @@ import (
 	"github.com/TabSlate-dev/TabSlate-server/internal/model"
 	"github.com/TabSlate-dev/TabSlate-server/internal/ratelimit"
 	"github.com/TabSlate-dev/TabSlate-server/internal/store"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 const (
@@ -277,6 +277,19 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	resp, err := h.issueTokens(&user)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue tokens"})
+		return
+	}
+
+	now := time.Now().Unix()
+	if _, err := h.db.Exec(ctx,
+		`UPDATE users SET last_login_at = $1, updated_at = $2, deletion_requested_at = NULL, deletion_reminder_sent_at = NULL WHERE id = $3`,
+		now, now, user.ID,
+	); err != nil {
+		tokenHash := auth.HashRefreshToken(resp.RefreshToken)
+		if _, cleanupErr := h.db.Exec(ctx, `DELETE FROM refresh_tokens WHERE token_hash = $1`, tokenHash); cleanupErr != nil {
+			log.Printf("cleanup refresh token after last_login_at failure for user %s: %v", user.ID, cleanupErr)
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update last login"})
 		return
 	}
 	c.JSON(http.StatusOK, resp)
@@ -615,18 +628,96 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// POST /auth/delete-account
+func (h *AuthHandler) DeleteAccount(c *gin.Context) {
+	var req model.DeleteAccountRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+	userID := middleware.UserID(c)
+	now := time.Now().Unix()
+
+	var user model.User
+	var deletionRequestedAt *int64
+	var lastLoginAt *int64
+	if err := h.db.QueryRow(ctx,
+		`SELECT id, name, email, password_hash, deletion_requested_at, last_login_at FROM users WHERE id = $1`,
+		userID,
+	).Scan(&user.ID, &user.Name, &user.Email, &user.PasswordHash, &deletionRequestedAt, &lastLoginAt); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch user"})
+		return
+	}
+
+	if err := auth.CheckPassword(user.PasswordHash, req.Password); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
+		return
+	}
+
+	// Idempotent: if a deletion is already pending, return its schedule.
+	if deletionRequestedAt != nil {
+		basis := *deletionRequestedAt
+		if lastLoginAt != nil && *lastLoginAt > basis {
+			basis = *lastLoginAt
+		}
+		executesAt := basis + 30*24*60*60
+		if executesAt > now {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":        "account deletion already scheduled",
+				"scheduled_at": *deletionRequestedAt,
+				"executes_at":  executesAt,
+			})
+			return
+		}
+	}
+
+	if _, err := h.db.Exec(ctx,
+		`UPDATE users SET deletion_requested_at = $1, deletion_reminder_sent_at = NULL, updated_at = $2 WHERE id = $3`,
+		now, now, userID,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to schedule deletion"})
+		return
+	}
+
+	// Revoke all server-side sessions so the user is forced to re-authenticate
+	// if they change their mind and want to log back in (which cancels deletion).
+	h.db.Exec(ctx, `DELETE FROM refresh_tokens WHERE user_id = $1`, userID)
+
+	executesAt := now + 30*24*60*60
+	lang := parseLang(c.GetHeader("Accept-Language"))
+	go func() {
+		data := mailer.AccountDeletionEmailData{ExecutesAt: time.Unix(executesAt, 0)}
+		if err := h.mailer.SendAccountDeletion(context.Background(), user.Email, user.Name, "deletion_requested", lang, data); err != nil {
+			log.Printf("failed to send account deletion email to %s: %v", user.Email, err)
+		}
+	}()
+
+	c.JSON(http.StatusOK, gin.H{
+		"scheduled_at": now,
+		"executes_at":  executesAt,
+	})
+}
+
 // GET /auth/me
 func (h *AuthHandler) Me(c *gin.Context) {
 	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 
 	var user model.User
+	var deletionRequestedAt *int64
 	err := h.db.QueryRow(ctx,
-		`SELECT id, name, email, is_verified, created_at, updated_at FROM users WHERE id = $1`, userID,
-	).Scan(&user.ID, &user.Name, &user.Email, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt)
+		`SELECT id, name, email, is_verified, created_at, updated_at, deletion_requested_at FROM users WHERE id = $1`, userID,
+	).Scan(&user.ID, &user.Name, &user.Email, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt, &deletionRequestedAt)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
+	}
+
+	if deletionRequestedAt != nil {
+		scheduled := *deletionRequestedAt + 30*24*60*60
+		user.DeletionScheduledAt = &scheduled
 	}
 
 	// If the provider supports proactive reconciliation (Cloud only), ensure

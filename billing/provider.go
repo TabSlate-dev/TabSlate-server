@@ -69,3 +69,10 @@ type InstanceLimiter interface {
 	// exceed the instance's user count limit.
 	CheckRegistrationAllowed(ctx context.Context) error
 }
+
+// UserDeleter is an optional interface implemented by billing providers that
+// need to clean up external records when an account is permanently deleted.
+// OSS local.Provider does not implement this. Cloud flexprice.Provider may.
+type UserDeleter interface {
+	OnUserDeleted(ctx context.Context, userID string) error
+}
