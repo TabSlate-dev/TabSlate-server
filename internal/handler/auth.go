@@ -681,6 +681,10 @@ func (h *AuthHandler) DeleteAccount(c *gin.Context) {
 		return
 	}
 
+	// Revoke all server-side sessions so the user is forced to re-authenticate
+	// if they change their mind and want to log back in (which cancels deletion).
+	h.db.Exec(ctx, `DELETE FROM refresh_tokens WHERE user_id = $1`, userID)
+
 	executesAt := now + 30*24*60*60
 	lang := parseLang(c.GetHeader("Accept-Language"))
 	go func() {
