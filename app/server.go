@@ -188,11 +188,12 @@ func (s *Server) Run() {
 
 func (s *Server) setupCORS() {
 	s.router.Use(cors.New(cors.Config{
-		// Allow Chrome extension origins and direct (empty) origins in dev
+		// Allow Chrome and Firefox extension origins and direct (empty) origins in dev
 		AllowOriginFunc: func(origin string) bool {
 			return origin == "" ||
 				origin == "null" ||
-				(len(origin) >= 19 && origin[:19] == "chrome-extension://")
+				(len(origin) >= 19 && origin[:19] == "chrome-extension://") ||
+				(len(origin) >= 16 && origin[:16] == "moz-extension://")
 		},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
