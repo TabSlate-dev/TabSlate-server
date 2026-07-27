@@ -23,6 +23,7 @@ import (
 	"github.com/TabSlate-dev/TabSlate-server/internal/store"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const (
@@ -56,6 +57,10 @@ type AuthHandler struct {
 
 	otpCaptchaThreshold int
 	otpCaptchaWindow    time.Duration
+}
+
+type refreshTokenStore interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 }
 
 func NewAuthHandler(
@@ -581,24 +586,28 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 	ctx := c.Request.Context()
 	tokenHash := auth.HashRefreshToken(req.RefreshToken)
 
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to refresh token"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
 	var userID string
-	var expiresAt int64
-	err := h.db.QueryRow(ctx,
-		`SELECT user_id, expires_at FROM refresh_tokens WHERE token_hash = $1`,
+	err = tx.QueryRow(ctx,
+		`DELETE FROM refresh_tokens
+		 WHERE token_hash = $1 AND expires_at >= $2
+		 RETURNING user_id`,
 		tokenHash,
-	).Scan(&userID, &expiresAt)
-	if err != nil || time.Now().Unix() > expiresAt {
+		time.Now().Unix(),
+	).Scan(&userID)
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired refresh token"})
 		return
 	}
 
-	if _, err := h.db.Exec(ctx, `DELETE FROM refresh_tokens WHERE token_hash = $1`, tokenHash); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to invalidate refresh token"})
-		return
-	}
-
 	var user model.User
-	if err := h.db.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT id, name, email, is_verified, created_at, updated_at, suspended_at FROM users WHERE id = $1`, userID,
 	).Scan(&user.ID, &user.Name, &user.Email, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt, &user.SuspendedAt); err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired refresh token"})
@@ -606,13 +615,21 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 	}
 
 	if user.SuspendedAt != nil {
+		if err := tx.Commit(ctx); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to refresh token"})
+			return
+		}
 		c.JSON(http.StatusForbidden, gin.H{"error": "account suspended: instance user limit exceeded"})
 		return
 	}
 
-	resp, err := h.issueTokens(&user)
+	resp, err := h.issueTokensWithStore(ctx, tx, &user)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue tokens"})
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to refresh token"})
 		return
 	}
 	c.JSON(http.StatusOK, resp)
@@ -771,6 +788,14 @@ func (h *AuthHandler) LoginCaptchaStatus(c *gin.Context) {
 // ─── Private helpers ─────────────────────────────────────────────────────────
 
 func (h *AuthHandler) issueTokens(user *model.User) (*model.AuthResponse, error) {
+	return h.issueTokensWithStore(context.Background(), h.db, user)
+}
+
+func (h *AuthHandler) issueTokensWithStore(
+	ctx context.Context,
+	store refreshTokenStore,
+	user *model.User,
+) (*model.AuthResponse, error) {
 	accessToken, err := auth.SignAccessToken(user.ID, h.secret)
 	if err != nil {
 		return nil, err
@@ -782,7 +807,7 @@ func (h *AuthHandler) issueTokens(user *model.User) (*model.AuthResponse, error)
 	}
 
 	expiresAt := time.Now().Add(auth.RefreshTokenTTL).Unix()
-	if _, err := h.db.Exec(context.Background(),
+	if _, err := store.Exec(ctx,
 		`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES ($1,$2,$3,$4)`,
 		uuid.NewString(), user.ID, hashRefresh, expiresAt,
 	); err != nil {

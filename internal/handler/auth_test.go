@@ -1,11 +1,13 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -145,6 +147,129 @@ func TestLogin_DoesNotUpdateLastLoginAtWhenTokenIssuanceFails(t *testing.T) {
 	}
 	if lastLoginAt != nil {
 		t.Fatalf("expected last_login_at to remain NULL, got %d", *lastLoginAt)
+	}
+}
+
+func TestRefresh_ConsumesConcurrentRequestsOnlyOnce(t *testing.T) {
+	testDB := openAuthTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+		email:    "concurrent-refresh@example.com",
+		password: "Password123",
+	})
+	h := newAuthTestHandler(testDB)
+	issued, err := h.issueTokens(&model.User{ID: userID})
+	if err != nil {
+		t.Fatalf("issue refresh token: %v", err)
+	}
+
+	if _, err := testDB.Exec(t.Context(), `
+		CREATE OR REPLACE FUNCTION test_delay_refresh_token_delete() RETURNS trigger AS $$
+		BEGIN
+			PERFORM pg_sleep(0.2);
+			RETURN OLD;
+		END;
+		$$ LANGUAGE plpgsql;
+		CREATE TRIGGER test_delay_refresh_token_delete
+		BEFORE DELETE ON refresh_tokens
+		FOR EACH ROW EXECUTE FUNCTION test_delay_refresh_token_delete();
+	`); err != nil {
+		t.Fatalf("create refresh delete trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testDB.Exec(context.Background(), `DROP TRIGGER IF EXISTS test_delay_refresh_token_delete ON refresh_tokens`)
+		_, _ = testDB.Exec(context.Background(), `DROP FUNCTION IF EXISTS test_delay_refresh_token_delete()`)
+	})
+
+	start := make(chan struct{})
+	ready := make(chan struct{}, 2)
+	statuses := make(chan int, 2)
+	var requests sync.WaitGroup
+	requests.Add(2)
+	for range 2 {
+		go func() {
+			defer requests.Done()
+			ready <- struct{}{}
+			<-start
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(
+				http.MethodPost,
+				"/auth/refresh",
+				strings.NewReader(`{"refresh_token":"`+issued.RefreshToken+`"}`),
+			)
+			c.Request.Header.Set("Content-Type", "application/json")
+			h.Refresh(c)
+			statuses <- w.Code
+		}()
+	}
+
+	<-ready
+	<-ready
+	close(start)
+	requests.Wait()
+	close(statuses)
+
+	statusCount := map[int]int{}
+	for status := range statuses {
+		statusCount[status]++
+	}
+	if statusCount[http.StatusOK] != 1 || statusCount[http.StatusUnauthorized] != 1 {
+		t.Fatalf("refresh statuses = %#v, want one 200 and one 401", statusCount)
+	}
+
+	var refreshTokenCount int
+	if err := testDB.QueryRow(t.Context(), `SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1`, userID).Scan(&refreshTokenCount); err != nil {
+		t.Fatalf("count replacement refresh tokens: %v", err)
+	}
+	if refreshTokenCount != 1 {
+		t.Fatalf("refresh token count = %d, want 1", refreshTokenCount)
+	}
+}
+
+func TestRefresh_RotatingOneDeviceDoesNotRevokeAnotherDevice(t *testing.T) {
+	testDB := openAuthTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+		email:    "multi-device-refresh@example.com",
+		password: "Password123",
+	})
+	h := newAuthTestHandler(testDB)
+	user := &model.User{ID: userID}
+	deviceA, err := h.issueTokens(user)
+	if err != nil {
+		t.Fatalf("issue device A token: %v", err)
+	}
+	deviceB, err := h.issueTokens(user)
+	if err != nil {
+		t.Fatalf("issue device B token: %v", err)
+	}
+
+	refresh := func(refreshToken string) int {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(
+			http.MethodPost,
+			"/auth/refresh",
+			strings.NewReader(`{"refresh_token":"`+refreshToken+`"}`),
+		)
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.Refresh(c)
+		return w.Code
+	}
+
+	if status := refresh(deviceA.RefreshToken); status != http.StatusOK {
+		t.Fatalf("device A refresh status = %d, want %d", status, http.StatusOK)
+	}
+	if status := refresh(deviceB.RefreshToken); status != http.StatusOK {
+		t.Fatalf("device B refresh status = %d, want %d", status, http.StatusOK)
+	}
+
+	var refreshTokenCount int
+	if err := testDB.QueryRow(t.Context(), `SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1`, userID).Scan(&refreshTokenCount); err != nil {
+		t.Fatalf("count device refresh tokens: %v", err)
+	}
+	if refreshTokenCount != 2 {
+		t.Fatalf("refresh token count = %d, want 2", refreshTokenCount)
 	}
 }
 
