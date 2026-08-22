@@ -304,6 +304,38 @@ func TestCollectionQuotaCountsOnlyActiveCollections(t *testing.T) {
 	assertEntityCount(t, testDB, `SELECT COUNT(*) FROM collections WHERE id = 'archived-collection' AND archived_at IS NOT NULL`, 1)
 }
 
+func TestSyncPushCollectionQuotaCountsOnlyActiveCollections(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-push-active-collections@example.com", password: "password123"})
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO collections (id, user_id, name, position, deleted_at, archived_at, is_deleted, created_at, updated_at)
+		VALUES ('sync-archived-collection', $1, 'Archived', 0, NULL, 1, 0, 1, 1),
+		       ('sync-trashed-collection', $1, 'Trashed', 1, 1, NULL, 1, 1, 1)`, userID); err != nil {
+		t.Fatalf("insert inactive collections: %v", err)
+	}
+
+	limits := syncTestLimits()
+	limits.MaxCollections = 1
+	firstRecorder := pushSync(t, testDB, userID, limits, model.SyncEntities{
+		Collections: []model.Collection{{ID: "sync-first-active", Name: "First", Position: 2}},
+	})
+	assertSyncStatusOK(t, firstRecorder)
+	firstResponse := decodeSyncPushResponse(t, firstRecorder)
+	if len(firstResponse.Rejected) != 0 {
+		t.Fatalf("first push rejected = %#v, want none", firstResponse.Rejected)
+	}
+	assertEntityCount(t, testDB, `SELECT COUNT(*) FROM collections WHERE id = 'sync-first-active' AND deleted_at IS NULL AND archived_at IS NULL`, 1)
+
+	secondRecorder := pushSync(t, testDB, userID, limits, model.SyncEntities{
+		Collections: []model.Collection{{ID: "sync-archived-collection", Name: "Restored", Position: 0}},
+	})
+	assertSyncStatusOK(t, secondRecorder)
+	assertRejected(t, decodeSyncPushResponse(t, secondRecorder), model.Rejected{
+		ID: "sync-archived-collection", Reason: "quota_exceeded", Type: "collection",
+	})
+	assertEntityCount(t, testDB, `SELECT COUNT(*) FROM collections WHERE id = 'sync-archived-collection' AND archived_at IS NOT NULL`, 1)
+}
+
 func assertSyncStatusOK(t *testing.T, recorder *httptest.ResponseRecorder) {
 	t.Helper()
 	if recorder.Code != http.StatusOK {
