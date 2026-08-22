@@ -184,7 +184,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				return
 			}
 			if ct.RowsAffected() == 0 {
-				rejected = append(rejected, model.Rejected{ID: ws.ID, Reason: "stale"})
+				rejected = append(rejected, staleRejection(ws.ID, "workspace"))
 			}
 		}
 		br.Close()
@@ -225,7 +225,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				return
 			}
 			if ct.RowsAffected() == 0 {
-				rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "stale"})
+				rejected = append(rejected, staleRejection(col.ID, "collection"))
 			} else if col.IsDeleted == 2 {
 				// Cascade permanent deletion to any remaining bookmarks in this collection.
 				// The client pushes individual is_trashed:2 tombstones, but if that push
@@ -285,7 +285,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				return
 			}
 			if ct.RowsAffected() == 0 {
-				rejected = append(rejected, model.Rejected{ID: bm.ID, Reason: "stale"})
+				rejected = append(rejected, staleRejection(bm.ID, "bookmark"))
 			} else {
 				if bm.DeletedAt != nil || bm.IsTrashed > 0 {
 					searchDeletes = append(searchDeletes, bm.ID)
@@ -326,7 +326,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				return
 			}
 			if ct.RowsAffected() == 0 {
-				rejected = append(rejected, model.Rejected{ID: t.ID, Reason: "stale"})
+				rejected = append(rejected, staleRejection(t.ID, "tag"))
 			}
 		}
 		br.Close()
@@ -367,7 +367,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				return
 			}
 			if ct.RowsAffected() == 0 {
-				rejected = append(rejected, model.Rejected{ID: g.ID, Reason: "stale"})
+				rejected = append(rejected, staleRejection(g.ID, "saved_group"))
 			} else {
 				acceptedGroups = append(acceptedGroups, g)
 			}

@@ -4,6 +4,10 @@ import "github.com/TabSlate-dev/TabSlate-server/internal/model"
 
 type entityIDSet map[string]struct{}
 
+func staleRejection(entityID string, entityType string) model.Rejected {
+	return model.Rejected{ID: entityID, Reason: "stale", Type: entityType}
+}
+
 func (set entityIDSet) Add(id string) {
 	set[id] = struct{}{}
 }
