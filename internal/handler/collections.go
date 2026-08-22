@@ -4,13 +4,13 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/TabSlate-dev/TabSlate-server/billing"
 	"github.com/TabSlate-dev/TabSlate-server/db"
 	"github.com/TabSlate-dev/TabSlate-server/internal/middleware"
 	"github.com/TabSlate-dev/TabSlate-server/internal/model"
 	"github.com/TabSlate-dev/TabSlate-server/internal/pubsub"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type CollectionHandler struct {
@@ -88,7 +88,7 @@ func (h *CollectionHandler) Create(c *gin.Context) {
 	}
 	if limits.MaxCollections != -1 {
 		var count int
-		if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM collections WHERE user_id = $1 AND is_deleted < 2`, userID).Scan(&count); err != nil {
+		if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM collections WHERE user_id = $1 AND deleted_at IS NULL AND archived_at IS NULL`, userID).Scan(&count); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
 			return
 		}

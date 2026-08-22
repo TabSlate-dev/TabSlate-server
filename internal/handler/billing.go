@@ -6,11 +6,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/TabSlate-dev/TabSlate-server/billing"
 	"github.com/TabSlate-dev/TabSlate-server/db"
 	"github.com/TabSlate-dev/TabSlate-server/internal/middleware"
 	"github.com/TabSlate-dev/TabSlate-server/internal/store"
+	"github.com/gin-gonic/gin"
 )
 
 // BillingHandler exposes plan, limits, checkout, and invoice endpoints.
@@ -108,7 +108,7 @@ func (h *BillingHandler) GetPlan(c *gin.Context) {
 	}
 
 	if err := h.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM collections WHERE user_id = $1 AND is_deleted < 2`,
+		`SELECT COUNT(*) FROM collections WHERE user_id = $1 AND deleted_at IS NULL AND archived_at IS NULL`,
 		userID,
 	).Scan(&usage.Collections); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch usage"})

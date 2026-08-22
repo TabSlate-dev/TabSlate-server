@@ -5,14 +5,14 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5"
 	"github.com/TabSlate-dev/TabSlate-server/billing"
 	"github.com/TabSlate-dev/TabSlate-server/db"
 	"github.com/TabSlate-dev/TabSlate-server/internal/middleware"
 	"github.com/TabSlate-dev/TabSlate-server/internal/model"
 	"github.com/TabSlate-dev/TabSlate-server/internal/pubsub"
 	"github.com/TabSlate-dev/TabSlate-server/internal/search"
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 )
 
 type SyncHandler struct {
@@ -67,6 +67,56 @@ func (h *SyncHandler) Push(c *gin.Context) {
 
 	now := time.Now().UnixMilli()
 	var rejected []model.Rejected
+	ownedWorkspaceIDs := entityIDSet{}
+	if len(req.Entities.Collections) > 0 || len(req.Entities.Groups) > 0 {
+		rows, queryErr := tx.Query(ctx, `SELECT id FROM workspaces WHERE user_id = $1`, userID)
+		if queryErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace parent check failed"})
+			return
+		}
+		for rows.Next() {
+			var id string
+			if scanErr := rows.Scan(&id); scanErr != nil {
+				rows.Close()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace parent check failed"})
+				return
+			}
+			ownedWorkspaceIDs.Add(id)
+		}
+		rows.Close()
+		if rowsErr := rows.Err(); rowsErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace parent check failed"})
+			return
+		}
+	}
+
+	ownedCollectionIDs := entityIDSet{}
+	if len(req.Entities.Bookmarks) > 0 {
+		rows, queryErr := tx.Query(ctx, `SELECT id FROM collections WHERE user_id = $1`, userID)
+		if queryErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace parent check failed"})
+			return
+		}
+		for rows.Next() {
+			var id string
+			if scanErr := rows.Scan(&id); scanErr != nil {
+				rows.Close()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace parent check failed"})
+				return
+			}
+			ownedCollectionIDs.Add(id)
+		}
+		rows.Close()
+		if rowsErr := rows.Err(); rowsErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace parent check failed"})
+			return
+		}
+	}
+
+	acceptedWorkspaceIDs := entityIDSet{}
+	unavailableWorkspaceIDs := entityIDSet{}
+	acceptedCollectionIDs := entityIDSet{}
+	unavailableCollectionIDs := entityIDSet{}
 
 	// ── Pre-fetch quota baselines ─────────────────────────────────────────────
 	// One query per quota-limited entity type, regardless of push size.
@@ -102,7 +152,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	colQuotaCount := 0
 	if limits.MaxCollections != -1 && len(req.Entities.Collections) > 0 {
 		rows, err := tx.Query(ctx,
-			`SELECT id FROM collections WHERE user_id = $1 AND is_deleted < 2`, userID)
+			`SELECT id FROM collections WHERE user_id = $1 AND deleted_at IS NULL AND archived_at IS NULL`, userID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
 			return
@@ -157,6 +207,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			if _, exists := activeWSIDs[ws.ID]; !exists {
 				if wsQuotaCount >= limits.MaxWorkspaces {
 					rejected = append(rejected, model.Rejected{ID: ws.ID, Reason: "quota_exceeded", Type: "workspace"})
+					unavailableWorkspaceIDs.Add(ws.ID)
 					continue
 				}
 				wsQuotaCount++
@@ -185,7 +236,13 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			}
 			if ct.RowsAffected() == 0 {
 				rejected = append(rejected, staleRejection(ws.ID, "workspace"))
+				if !ownedWorkspaceIDs.Has(ws.ID) {
+					unavailableWorkspaceIDs.Add(ws.ID)
+				}
+				continue
 			}
+			acceptedWorkspaceIDs.Add(ws.ID)
+			ownedWorkspaceIDs.Add(ws.ID)
 		}
 		br.Close()
 	}
@@ -193,10 +250,19 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	// ── Collections ───────────────────────────────────────────────────────────
 	var colUpserts []model.Collection
 	for _, col := range req.Entities.Collections {
-		if col.DeletedAt == nil && limits.MaxCollections != -1 {
+		if dependency := classifyParent(
+			col.ID, "collection", col.WorkspaceID, "workspace", true,
+			ownedWorkspaceIDs, acceptedWorkspaceIDs, unavailableWorkspaceIDs,
+		); dependency != nil {
+			rejected = append(rejected, *dependency)
+			unavailableCollectionIDs.Add(col.ID)
+			continue
+		}
+		if col.DeletedAt == nil && col.ArchivedAt == nil && limits.MaxCollections != -1 {
 			if _, exists := activeColIDs[col.ID]; !exists {
 				if colQuotaCount >= limits.MaxCollections {
 					rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "quota_exceeded", Type: "collection"})
+					unavailableCollectionIDs.Add(col.ID)
 					continue
 				}
 				colQuotaCount++
@@ -226,12 +292,19 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			}
 			if ct.RowsAffected() == 0 {
 				rejected = append(rejected, staleRejection(col.ID, "collection"))
+				if !ownedCollectionIDs.Has(col.ID) {
+					unavailableCollectionIDs.Add(col.ID)
+				}
 			} else if col.IsDeleted == 2 {
 				// Cascade permanent deletion to any remaining bookmarks in this collection.
 				// The client pushes individual is_trashed:2 tombstones, but if that push
 				// was skipped (e.g. empty local IDB on a fresh session), bookmarks would
 				// stay at is_trashed=1 forever. This ensures the server is the final authority.
 				cascadeIDs = append(cascadeIDs, col.ID)
+			}
+			if ct.RowsAffected() > 0 {
+				acceptedCollectionIDs.Add(col.ID)
+				ownedCollectionIDs.Add(col.ID)
 			}
 		}
 		br.Close()
@@ -258,9 +331,20 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	var searchDeletes []string
 
 	// ── Bookmarks ─────────────────────────────────────────────────────────────
-	if len(req.Entities.Bookmarks) > 0 {
+	var bookmarkUpserts []model.Bookmark
+	for _, bookmark := range req.Entities.Bookmarks {
+		if dependency := classifyParent(
+			bookmark.ID, "bookmark", bookmark.CollectionID, "collection", true,
+			ownedCollectionIDs, acceptedCollectionIDs, unavailableCollectionIDs,
+		); dependency != nil {
+			rejected = append(rejected, *dependency)
+			continue
+		}
+		bookmarkUpserts = append(bookmarkUpserts, bookmark)
+	}
+	if len(bookmarkUpserts) > 0 {
 		batch := &pgx.Batch{}
-		for _, bm := range req.Entities.Bookmarks {
+		for _, bm := range bookmarkUpserts {
 			tagIDs := bm.TagIDs
 			if tagIDs == nil {
 				tagIDs = []string{}
@@ -277,7 +361,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				bm.IsFavorite, bm.IsArchived, bm.IsTrashed, bm.Position, seq, bm.DeletedAt, now, tagIDs)
 		}
 		br := tx.SendBatch(ctx, batch)
-		for _, bm := range req.Entities.Bookmarks {
+		for _, bm := range bookmarkUpserts {
 			ct, err := br.Exec()
 			if err != nil {
 				br.Close()
@@ -335,6 +419,13 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	// ── Groups ────────────────────────────────────────────────────────────────
 	var groupUpserts []model.Group
 	for _, g := range req.Entities.Groups {
+		if dependency := classifyParent(
+			g.ID, "saved_group", g.WorkspaceID, "workspace", false,
+			ownedWorkspaceIDs, acceptedWorkspaceIDs, unavailableWorkspaceIDs,
+		); dependency != nil {
+			rejected = append(rejected, *dependency)
+			continue
+		}
 		if g.DeletedAt == nil && limits.MaxSavedGroups != -1 {
 			if _, exists := activeGroupIDs[g.ID]; !exists {
 				if groupQuotaCount >= limits.MaxSavedGroups {
