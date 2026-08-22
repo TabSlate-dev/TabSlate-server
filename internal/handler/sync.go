@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -45,23 +46,53 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "too many entities in one push (max 1000)"})
 		return
 	}
+	workspaceIDs := make([]string, 0, len(req.Entities.Workspaces))
+	collectionIDs := make([]string, 0, len(req.Entities.Collections))
+	bookmarkIDs := make([]string, 0, len(req.Entities.Bookmarks))
+	tagIDs := make([]string, 0, len(req.Entities.Tags))
+	groupIDs := make([]string, 0, len(req.Entities.Groups))
+	entityIDs := make([]string, 0, total)
+	for _, workspace := range req.Entities.Workspaces {
+		workspaceIDs = append(workspaceIDs, workspace.ID)
+	}
+	for _, collection := range req.Entities.Collections {
+		collectionIDs = append(collectionIDs, collection.ID)
+	}
+	for _, bookmark := range req.Entities.Bookmarks {
+		bookmarkIDs = append(bookmarkIDs, bookmark.ID)
+	}
+	for _, tag := range req.Entities.Tags {
+		tagIDs = append(tagIDs, tag.ID)
+	}
+	for _, group := range req.Entities.Groups {
+		groupIDs = append(groupIDs, group.ID)
+	}
+	entityIDs = append(entityIDs, workspaceIDs...)
+	entityIDs = append(entityIDs, collectionIDs...)
+	entityIDs = append(entityIDs, bookmarkIDs...)
+	entityIDs = append(entityIDs, tagIDs...)
+	entityIDs = append(entityIDs, groupIDs...)
+	workspaceChildIDs := make([]string, 0, len(collectionIDs)+len(groupIDs))
+	workspaceChildIDs = append(workspaceChildIDs, collectionIDs...)
+	workspaceChildIDs = append(workspaceChildIDs, groupIDs...)
 
 	limits, err := h.billing.GetLimits(ctx, userID)
 	if err != nil {
+		log.Printf("sync push operation=%q user_id=%q entity_ids=%q error=%v", "quota check", userID, boundedSyncEntityIDs(entityIDs), err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
 		return
 	}
 
 	tx, err := h.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "tx begin failed"})
+		respondSyncDatabaseError(c, "transaction begin", userID, entityIDs, err)
 		return
 	}
 	defer tx.Rollback(ctx)
 
 	seq, err := incrementSeq(ctx, tx, userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "seq increment failed"})
+		respondSyncDatabaseError(c, "sequence increment", userID, entityIDs, err)
 		return
 	}
 
@@ -71,21 +102,21 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	if len(req.Entities.Collections) > 0 || len(req.Entities.Groups) > 0 {
 		rows, queryErr := tx.Query(ctx, `SELECT id FROM workspaces WHERE user_id = $1`, userID)
 		if queryErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace parent check failed"})
+			respondSyncDatabaseError(c, "workspace parent query", userID, workspaceChildIDs, queryErr)
 			return
 		}
 		for rows.Next() {
 			var id string
 			if scanErr := rows.Scan(&id); scanErr != nil {
 				rows.Close()
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace parent check failed"})
+				respondSyncDatabaseError(c, "workspace parent scan", userID, workspaceChildIDs, scanErr)
 				return
 			}
 			ownedWorkspaceIDs.Add(id)
 		}
 		rows.Close()
 		if rowsErr := rows.Err(); rowsErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace parent check failed"})
+			respondSyncDatabaseError(c, "workspace parent iteration", userID, workspaceChildIDs, rowsErr)
 			return
 		}
 	}
@@ -94,21 +125,21 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	if len(req.Entities.Bookmarks) > 0 {
 		rows, queryErr := tx.Query(ctx, `SELECT id FROM collections WHERE user_id = $1`, userID)
 		if queryErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace parent check failed"})
+			respondSyncDatabaseError(c, "collection parent query", userID, bookmarkIDs, queryErr)
 			return
 		}
 		for rows.Next() {
 			var id string
 			if scanErr := rows.Scan(&id); scanErr != nil {
 				rows.Close()
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace parent check failed"})
+				respondSyncDatabaseError(c, "collection parent scan", userID, bookmarkIDs, scanErr)
 				return
 			}
 			ownedCollectionIDs.Add(id)
 		}
 		rows.Close()
 		if rowsErr := rows.Err(); rowsErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace parent check failed"})
+			respondSyncDatabaseError(c, "collection parent iteration", userID, bookmarkIDs, rowsErr)
 			return
 		}
 	}
@@ -128,21 +159,21 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		rows, err := tx.Query(ctx,
 			`SELECT id FROM workspaces WHERE user_id = $1 AND deleted_at IS NULL`, userID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			respondSyncDatabaseError(c, "workspace quota query", userID, workspaceIDs, err)
 			return
 		}
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
 				rows.Close()
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+				respondSyncDatabaseError(c, "workspace quota scan", userID, workspaceIDs, err)
 				return
 			}
 			activeWSIDs[id] = struct{}{}
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			respondSyncDatabaseError(c, "workspace quota iteration", userID, workspaceIDs, err)
 			return
 		}
 		wsQuotaCount = len(activeWSIDs)
@@ -154,21 +185,21 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		rows, err := tx.Query(ctx,
 			`SELECT id FROM collections WHERE user_id = $1 AND deleted_at IS NULL AND archived_at IS NULL`, userID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			respondSyncDatabaseError(c, "collection quota query", userID, collectionIDs, err)
 			return
 		}
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
 				rows.Close()
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+				respondSyncDatabaseError(c, "collection quota scan", userID, collectionIDs, err)
 				return
 			}
 			activeColIDs[id] = struct{}{}
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			respondSyncDatabaseError(c, "collection quota iteration", userID, collectionIDs, err)
 			return
 		}
 		colQuotaCount = len(activeColIDs)
@@ -180,21 +211,21 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		rows, err := tx.Query(ctx,
 			`SELECT id FROM groups WHERE user_id = $1 AND deleted_at IS NULL`, userID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			respondSyncDatabaseError(c, "saved group quota query", userID, groupIDs, err)
 			return
 		}
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
 				rows.Close()
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+				respondSyncDatabaseError(c, "saved group quota scan", userID, groupIDs, err)
 				return
 			}
 			activeGroupIDs[id] = struct{}{}
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+			respondSyncDatabaseError(c, "saved group quota iteration", userID, groupIDs, err)
 			return
 		}
 		groupQuotaCount = len(activeGroupIDs)
@@ -231,7 +262,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			ct, err := br.Exec()
 			if err != nil {
 				br.Close()
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace upsert failed"})
+				respondSyncDatabaseError(c, "workspace upsert", userID, workspaceIDs, err)
 				return
 			}
 			if ct.RowsAffected() == 0 {
@@ -244,7 +275,10 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			acceptedWorkspaceIDs.Add(ws.ID)
 			ownedWorkspaceIDs.Add(ws.ID)
 		}
-		br.Close()
+		if closeErr := br.Close(); closeErr != nil {
+			respondSyncDatabaseError(c, "close workspace batch", userID, workspaceIDs, closeErr)
+			return
+		}
 	}
 
 	// ── Collections ───────────────────────────────────────────────────────────
@@ -287,7 +321,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			ct, err := br.Exec()
 			if err != nil {
 				br.Close()
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "collection upsert failed"})
+				respondSyncDatabaseError(c, "collection upsert", userID, collectionIDs, err)
 				return
 			}
 			if ct.RowsAffected() == 0 {
@@ -307,7 +341,10 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				ownedCollectionIDs.Add(col.ID)
 			}
 		}
-		br.Close()
+		if closeErr := br.Close(); closeErr != nil {
+			respondSyncDatabaseError(c, "close collection batch", userID, collectionIDs, closeErr)
+			return
+		}
 		if len(cascadeIDs) > 0 {
 			cb := &pgx.Batch{}
 			for _, colID := range cascadeIDs {
@@ -319,11 +356,14 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			for range cascadeIDs {
 				if _, err := cbr.Exec(); err != nil {
 					cbr.Close()
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark cascade failed"})
+					respondSyncDatabaseError(c, "bookmark cascade", userID, cascadeIDs, err)
 					return
 				}
 			}
-			cbr.Close()
+			if closeErr := cbr.Close(); closeErr != nil {
+				respondSyncDatabaseError(c, "close bookmark cascade batch", userID, cascadeIDs, closeErr)
+				return
+			}
 		}
 	}
 
@@ -365,7 +405,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			ct, err := br.Exec()
 			if err != nil {
 				br.Close()
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "bookmark upsert failed"})
+				respondSyncDatabaseError(c, "bookmark upsert", userID, bookmarkIDs, err)
 				return
 			}
 			if ct.RowsAffected() == 0 {
@@ -386,7 +426,10 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				}
 			}
 		}
-		br.Close()
+		if closeErr := br.Close(); closeErr != nil {
+			respondSyncDatabaseError(c, "close bookmark batch", userID, bookmarkIDs, closeErr)
+			return
+		}
 	}
 
 	// ── Tags ──────────────────────────────────────────────────────────────────
@@ -406,14 +449,17 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			ct, err := br.Exec()
 			if err != nil {
 				br.Close()
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "tag upsert failed"})
+				respondSyncDatabaseError(c, "tag upsert", userID, tagIDs, err)
 				return
 			}
 			if ct.RowsAffected() == 0 {
 				rejected = append(rejected, staleRejection(t.ID, "tag"))
 			}
 		}
-		br.Close()
+		if closeErr := br.Close(); closeErr != nil {
+			respondSyncDatabaseError(c, "close tag batch", userID, tagIDs, closeErr)
+			return
+		}
 	}
 
 	// ── Groups ────────────────────────────────────────────────────────────────
@@ -454,7 +500,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			ct, err := br.Exec()
 			if err != nil {
 				br.Close()
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "group upsert failed"})
+				respondSyncDatabaseError(c, "saved group upsert", userID, groupIDs, err)
 				return
 			}
 			if ct.RowsAffected() == 0 {
@@ -463,7 +509,10 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				acceptedGroups = append(acceptedGroups, g)
 			}
 		}
-		br.Close()
+		if closeErr := br.Close(); closeErr != nil {
+			respondSyncDatabaseError(c, "close saved group batch", userID, groupIDs, closeErr)
+			return
+		}
 		// Atomically replace tab snapshots for all accepted groups in one batch.
 		if len(acceptedGroups) > 0 {
 			tabBatch := &pgx.Batch{}
@@ -479,23 +528,26 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			for _, g := range acceptedGroups {
 				if _, err := tbr.Exec(); err != nil { // DELETE
 					tbr.Close()
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "group_tabs clear failed"})
+					respondSyncDatabaseError(c, "group tab clear", userID, groupIDs, err)
 					return
 				}
 				for range g.Tabs {
 					if _, err := tbr.Exec(); err != nil { // INSERT tab
 						tbr.Close()
-						c.JSON(http.StatusInternalServerError, gin.H{"error": "group_tab insert failed"})
+						respondSyncDatabaseError(c, "group tab insert", userID, groupIDs, err)
 						return
 					}
 				}
 			}
-			tbr.Close()
+			if closeErr := tbr.Close(); closeErr != nil {
+				respondSyncDatabaseError(c, "close group tab batch", userID, groupIDs, closeErr)
+				return
+			}
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "commit failed"})
+		respondSyncDatabaseError(c, "transaction commit", userID, entityIDs, err)
 		return
 	}
 
