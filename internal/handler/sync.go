@@ -183,7 +183,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	colQuotaCount := 0
 	if limits.MaxCollections != -1 && len(req.Entities.Collections) > 0 {
 		rows, err := tx.Query(ctx,
-			`SELECT id FROM collections WHERE user_id = $1 AND deleted_at IS NULL AND archived_at IS NULL`, userID)
+			`SELECT id FROM collections WHERE user_id = $1 AND is_deleted < 2`, userID)
 		if err != nil {
 			respondSyncDatabaseError(c, "collection quota query", userID, collectionIDs, err)
 			return
