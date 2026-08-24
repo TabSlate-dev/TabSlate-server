@@ -24,13 +24,13 @@ func NewWorkspaceHandler(
 	d *db.DB,
 	hub pubsub.Hub,
 	bp billing.Provider,
-	lifecycle ...*WorkspaceLifecycleService,
+	lifecycle *WorkspaceLifecycleService,
 ) *WorkspaceHandler {
 	return &WorkspaceHandler{
 		db:        d,
 		hub:       hub,
 		billing:   bp,
-		lifecycle: firstWorkspaceLifecycleService(lifecycle),
+		lifecycle: lifecycle,
 	}
 }
 
@@ -41,7 +41,7 @@ func (h *WorkspaceHandler) List(c *gin.Context) {
 
 	rows, err := h.db.Query(ctx,
 		`SELECT id, user_id, name, icon, color, position, seq, created_at, updated_at
-		 FROM workspaces WHERE user_id=$1 AND deleted_at IS NULL ORDER BY position ASC`, userID)
+		 FROM workspaces WHERE user_id=$1 AND is_deleted=0 ORDER BY position ASC`, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list workspaces"})
 		return
@@ -152,7 +152,7 @@ func (h *WorkspaceHandler) Update(c *gin.Context) {
 
 	tag, err := tx.Exec(ctx,
 		`UPDATE workspaces SET name=$1, icon=$2, color=$3, position=$4, seq=$5, updated_at=$6
-		 WHERE id=$7 AND user_id=$8 AND deleted_at IS NULL`,
+		 WHERE id=$7 AND user_id=$8 AND is_deleted=0`,
 		req.Name, req.Icon, req.Color, req.Position, seq, now, id, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update workspace"})
@@ -174,42 +174,49 @@ func (h *WorkspaceHandler) Update(c *gin.Context) {
 
 // DELETE /workspaces/:id  →  soft-delete
 func (h *WorkspaceHandler) Delete(c *gin.Context) {
-	ctx := c.Request.Context()
+	h.applyLifecycle(c, model.WorkspaceLifecycleDelete, http.StatusNoContent)
+}
+
+// POST /workspaces/:id/restore
+func (h *WorkspaceHandler) Restore(c *gin.Context) {
+	h.applyLifecycle(c, model.WorkspaceLifecycleRestore, http.StatusOK)
+}
+
+// DELETE /workspaces/:id/permanent
+func (h *WorkspaceHandler) PermanentlyDelete(c *gin.Context) {
+	h.applyLifecycle(c, model.WorkspaceLifecyclePurge, http.StatusNoContent)
+}
+
+func (h *WorkspaceHandler) applyLifecycle(
+	c *gin.Context,
+	action model.WorkspaceLifecycleAction,
+	successStatus int,
+) {
 	userID := middleware.UserID(c)
 	id := c.Param("id")
-	now := time.Now().UnixMilli()
-
-	tx, err := h.db.Begin(ctx)
+	effect, rejection, err := h.lifecycle.Apply(c.Request.Context(), userID, id, action, 1)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "tx begin failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace lifecycle failed"})
 		return
 	}
-	defer tx.Rollback(ctx)
+	if rejection != nil {
+		c.JSON(workspaceLifecycleStatus(rejection.Reason), rejection)
+		return
+	}
+	if successStatus == http.StatusNoContent {
+		c.Status(successStatus)
+		return
+	}
+	c.JSON(successStatus, gin.H{"id": id, "seq": effect.Seq})
+}
 
-	seq, err := incrementSeq(ctx, tx, userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "seq increment failed"})
-		return
+func workspaceLifecycleStatus(reason string) int {
+	switch reason {
+	case model.RejectionReasonLastActiveWorkspace, model.RejectionReasonWorkspaceDeleted:
+		return http.StatusConflict
+	case model.RejectionReasonPermanentlyDeleted:
+		return http.StatusGone
+	default:
+		return http.StatusNotFound
 	}
-
-	tag, err := tx.Exec(ctx,
-		`UPDATE workspaces SET deleted_at=$1, seq=$2, updated_at=$1
-		 WHERE id=$3 AND user_id=$4 AND deleted_at IS NULL`,
-		now, seq, id, userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete workspace"})
-		return
-	}
-	if tag.RowsAffected() == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "workspace not found"})
-		return
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "commit failed"})
-		return
-	}
-
-	h.hub.Broadcast(userID, seq)
-	c.Status(http.StatusNoContent)
 }

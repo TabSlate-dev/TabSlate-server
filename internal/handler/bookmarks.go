@@ -5,14 +5,14 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/TabSlate-dev/TabSlate-server/billing"
 	"github.com/TabSlate-dev/TabSlate-server/db"
 	"github.com/TabSlate-dev/TabSlate-server/internal/middleware"
 	"github.com/TabSlate-dev/TabSlate-server/internal/model"
 	"github.com/TabSlate-dev/TabSlate-server/internal/pubsub"
 	"github.com/TabSlate-dev/TabSlate-server/internal/search"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type BookmarkHandler struct {
@@ -31,29 +31,32 @@ func (h *BookmarkHandler) List(c *gin.Context) {
 	ctx := c.Request.Context()
 	userID := middleware.UserID(c)
 
-	query := `SELECT id, user_id, collection_id, title, url, favicon_url, description,
-	                 is_favorite, is_archived, is_trashed, position, seq, created_at, updated_at
-	            FROM bookmarks WHERE user_id=$1 AND deleted_at IS NULL`
+	query := `SELECT b.id, b.user_id, b.collection_id, b.title, b.url, b.favicon_url, b.description,
+	                 b.is_favorite, b.is_archived, b.is_trashed, b.position, b.seq, b.created_at, b.updated_at
+	            FROM bookmarks b
+	            JOIN collections c ON c.id = b.collection_id AND c.user_id = b.user_id
+	            JOIN workspaces w ON w.id = c.workspace_id AND w.user_id = c.user_id
+	            WHERE b.user_id=$1 AND b.deleted_at IS NULL AND c.is_deleted=0 AND w.is_deleted=0`
 	args := []any{userID}
 	n := 2
 
 	if cid := c.Query("collection_id"); cid != "" {
-		query += fmt.Sprintf(" AND collection_id=$%d", n)
+		query += fmt.Sprintf(" AND b.collection_id=$%d", n)
 		args = append(args, cid)
 		n++
 	}
 	if c.Query("favorite") == "true" {
-		query += " AND is_favorite=true"
+		query += " AND b.is_favorite=true"
 	}
 	if c.Query("archived") == "true" {
-		query += " AND is_archived=true"
+		query += " AND b.is_archived=true"
 	}
 	if c.Query("trashed") == "true" {
-		query += " AND is_trashed > 0"
+		query += " AND b.is_trashed > 0"
 	} else {
-		query += " AND is_trashed = 0"
+		query += " AND b.is_trashed = 0"
 	}
-	query += " ORDER BY position ASC"
+	query += " ORDER BY b.position ASC"
 
 	rows, err := h.db.Query(ctx, query, args...)
 	if err != nil {
@@ -117,14 +120,22 @@ func (h *BookmarkHandler) Create(c *gin.Context) {
 		return
 	}
 
-	if _, err := tx.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO bookmarks (id, user_id, collection_id, title, url, favicon_url,
 		  description, is_favorite, is_archived, is_trashed, position, seq, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
+		 SELECT $1,$2,c.id,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13
+		 FROM collections c
+		 JOIN workspaces w ON w.id=c.workspace_id AND w.user_id=c.user_id
+		 WHERE c.id=$3 AND c.user_id=$2 AND c.deleted_at IS NULL AND c.is_deleted=0 AND w.is_deleted=0`,
 		id, userID, req.CollectionID, req.Title, req.URL, req.FaviconURL,
 		req.Description, req.IsFavorite, req.IsArchived, boolToInt(req.IsTrashed), req.Position, seq, now,
-	); err != nil {
+	)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create bookmark"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "collection not found"})
 		return
 	}
 
@@ -182,9 +193,18 @@ func (h *BookmarkHandler) Update(c *gin.Context) {
 	}
 
 	tag, err := tx.Exec(ctx,
-		`UPDATE bookmarks SET collection_id=$1, title=$2, url=$3, favicon_url=$4, description=$5,
-		  is_favorite=$6, is_archived=$7, is_trashed=$8, position=$9, seq=$10, updated_at=$11
-		  WHERE id=$12 AND user_id=$13 AND deleted_at IS NULL`,
+		`UPDATE bookmarks b
+		 SET collection_id=$1, title=$2, url=$3, favicon_url=$4, description=$5,
+		     is_favorite=$6, is_archived=$7, is_trashed=$8, position=$9, seq=$10, updated_at=$11
+		 FROM collections current_c
+		 JOIN workspaces current_w ON current_w.id=current_c.workspace_id AND current_w.user_id=current_c.user_id,
+		 collections target_c
+		 JOIN workspaces target_w ON target_w.id=target_c.workspace_id AND target_w.user_id=target_c.user_id
+		 WHERE b.id=$12 AND b.user_id=$13 AND b.deleted_at IS NULL
+		   AND current_c.id=b.collection_id AND current_c.user_id=b.user_id
+		   AND current_c.deleted_at IS NULL AND current_c.is_deleted=0 AND current_w.is_deleted=0
+		   AND target_c.id=$1 AND target_c.user_id=b.user_id
+		   AND target_c.deleted_at IS NULL AND target_c.is_deleted=0 AND target_w.is_deleted=0`,
 		req.CollectionID, req.Title, req.URL, req.FaviconURL, req.Description,
 		req.IsFavorite, req.IsArchived, boolToInt(req.IsTrashed), req.Position, seq, now, id, userID,
 	)
@@ -240,8 +260,12 @@ func (h *BookmarkHandler) Delete(c *gin.Context) {
 	}
 
 	tag, err := tx.Exec(ctx,
-		`UPDATE bookmarks SET deleted_at=$1, seq=$2, updated_at=$1
-		 WHERE id=$3 AND user_id=$4 AND deleted_at IS NULL`,
+		`UPDATE bookmarks b SET deleted_at=$1, seq=$2, updated_at=$1
+		 FROM collections c
+		 JOIN workspaces w ON w.id=c.workspace_id AND w.user_id=c.user_id
+		 WHERE b.id=$3 AND b.user_id=$4 AND b.deleted_at IS NULL
+		   AND c.id=b.collection_id AND c.user_id=b.user_id
+		   AND c.deleted_at IS NULL AND c.is_deleted=0 AND w.is_deleted=0`,
 		now, seq, id, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete bookmark"})

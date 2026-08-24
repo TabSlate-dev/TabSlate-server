@@ -33,8 +33,11 @@ func (h *CollectionHandler) List(c *gin.Context) {
 
 	if wsID := c.Query("workspace_id"); wsID != "" {
 		rows, qErr := h.db.Query(ctx,
-			`SELECT id, user_id, workspace_id, name, icon, position, seq, created_at, updated_at
-			 FROM collections WHERE user_id=$1 AND workspace_id=$2 AND deleted_at IS NULL ORDER BY position ASC`,
+			`SELECT c.id, c.user_id, c.workspace_id, c.name, c.icon, c.position, c.seq, c.created_at, c.updated_at
+			 FROM collections c
+			 JOIN workspaces w ON w.id = c.workspace_id AND w.user_id = c.user_id
+			 WHERE c.user_id=$1 AND c.workspace_id=$2 AND c.deleted_at IS NULL AND w.is_deleted=0
+			 ORDER BY c.position ASC`,
 			userID, wsID)
 		if qErr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list collections"})
@@ -49,8 +52,11 @@ func (h *CollectionHandler) List(c *gin.Context) {
 		err = rows.Err()
 	} else {
 		rows, qErr := h.db.Query(ctx,
-			`SELECT id, user_id, workspace_id, name, icon, position, seq, created_at, updated_at
-			 FROM collections WHERE user_id=$1 AND deleted_at IS NULL ORDER BY position ASC`,
+			`SELECT c.id, c.user_id, c.workspace_id, c.name, c.icon, c.position, c.seq, c.created_at, c.updated_at
+			 FROM collections c
+			 JOIN workspaces w ON w.id = c.workspace_id AND w.user_id = c.user_id
+			 WHERE c.user_id=$1 AND c.deleted_at IS NULL AND w.is_deleted=0
+			 ORDER BY c.position ASC`,
 			userID)
 		if qErr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list collections"})
@@ -120,12 +126,19 @@ func (h *CollectionHandler) Create(c *gin.Context) {
 		return
 	}
 
-	if _, err := tx.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO collections (id, user_id, workspace_id, name, icon, position, seq, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)`,
+		 SELECT $1,$2,w.id,$4,$5,$6,$7,$8,$8
+		 FROM workspaces w
+		 WHERE w.id=$3 AND w.user_id=$2 AND w.is_deleted=0`,
 		id, userID, req.WorkspaceID, req.Name, req.Icon, req.Position, seq, now,
-	); err != nil {
+	)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create collection"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "workspace not found"})
 		return
 	}
 
@@ -170,8 +183,12 @@ func (h *CollectionHandler) Update(c *gin.Context) {
 	}
 
 	tag, err := tx.Exec(ctx,
-		`UPDATE collections SET workspace_id=$1, name=$2, icon=$3, position=$4, seq=$5, updated_at=$6
-		 WHERE id=$7 AND user_id=$8 AND deleted_at IS NULL`,
+		`UPDATE collections c
+		 SET workspace_id=$1, name=$2, icon=$3, position=$4, seq=$5, updated_at=$6
+		 FROM workspaces current_w, workspaces target_w
+		 WHERE c.id=$7 AND c.user_id=$8 AND c.deleted_at IS NULL
+		   AND current_w.id=c.workspace_id AND current_w.user_id=c.user_id AND current_w.is_deleted=0
+		   AND target_w.id=$1 AND target_w.user_id=c.user_id AND target_w.is_deleted=0`,
 		req.WorkspaceID, req.Name, req.Icon, req.Position, seq, now, id, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update collection"})
@@ -212,8 +229,10 @@ func (h *CollectionHandler) Delete(c *gin.Context) {
 	}
 
 	tag, err := tx.Exec(ctx,
-		`UPDATE collections SET deleted_at=$1, seq=$2, updated_at=$1
-		 WHERE id=$3 AND user_id=$4 AND deleted_at IS NULL`,
+		`UPDATE collections c SET deleted_at=$1, seq=$2, updated_at=$1
+		 FROM workspaces w
+		 WHERE c.id=$3 AND c.user_id=$4 AND c.deleted_at IS NULL
+		   AND w.id=c.workspace_id AND w.user_id=c.user_id AND w.is_deleted=0`,
 		now, seq, id, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete collection"})

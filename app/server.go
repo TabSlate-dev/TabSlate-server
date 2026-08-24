@@ -215,7 +215,7 @@ func (s *Server) setupRoutes() {
 	bmH := handler.NewBookmarkHandler(s.db, s.search, s.infra.Hub, s.billing)
 	tagH := handler.NewTagHandler(s.db, s.infra.Hub, s.billing)
 	syncH := handler.NewSyncHandler(s.db, s.search, s.infra.Hub, s.billing, s.lifecycle)
-	searchH := handler.NewSearchHandler(s.search)
+	searchH := handler.NewSearchHandler(s.db, s.search)
 	sseH := handler.NewSSEHandler(s.infra.Hub, s.infra.Cache)
 	billH := handler.NewBillingHandler(s.billing, s.infra.Cache, s.db)
 	prefH := handler.NewPreferencesHandler(s.db)
@@ -255,6 +255,8 @@ func (s *Server) setupRoutes() {
 		api.POST("/workspaces", wsH.Create)
 		api.PUT("/workspaces/:id", wsH.Update)
 		api.DELETE("/workspaces/:id", wsH.Delete)
+		api.POST("/workspaces/:id/restore", wsH.Restore)
+		api.DELETE("/workspaces/:id/permanent", wsH.PermanentlyDelete)
 
 		api.GET("/collections", colH.List)
 		api.POST("/collections", colH.Create)
