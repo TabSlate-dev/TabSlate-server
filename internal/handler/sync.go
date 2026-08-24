@@ -170,14 +170,11 @@ func (h *SyncHandler) Push(c *gin.Context) {
 
 	legacyMetadataWorkspaceIDs := []string{}
 	legacyMetadataWorkspaceIDSet := entityIDSet{}
-	legacyDeleteMutationWorkspaceIDs := entityIDSet{}
 	if req.ProtocolVersion == 0 {
 		for _, workspace := range req.Entities.Workspaces {
 			if workspace.DeletedAt == nil {
 				legacyMetadataWorkspaceIDs = append(legacyMetadataWorkspaceIDs, workspace.ID)
 				legacyMetadataWorkspaceIDSet.Add(workspace.ID)
-			} else {
-				legacyDeleteMutationWorkspaceIDs.Add(workspace.ID)
 			}
 		}
 	}
@@ -299,48 +296,57 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	// ── Workspaces ────────────────────────────────────────────────────────────
 	var wsUpserts []model.SyncWorkspaceMutation
 	legacyDeletedWorkspaceIDs := []string{}
+	queueWorkspaceUpsert := func(ws model.SyncWorkspaceMutation) {
+		if ws.DeletedAt == nil && limits.MaxWorkspaces != -1 {
+			if _, exists := activeWSIDs[ws.ID]; !exists {
+				if wsQuotaCount >= limits.MaxWorkspaces {
+					rejected = append(rejected, model.Rejected{ID: ws.ID, Reason: "quota_exceeded", Type: "workspace"})
+					unavailableWorkspaceIDs.Add(ws.ID)
+					return
+				}
+				wsQuotaCount++
+			}
+		}
+		wsUpserts = append(wsUpserts, ws)
+	}
 	for _, ws := range req.Entities.Workspaces {
-		if ws.DeletedAt == nil &&
-			(deletedLegacyMetadataWorkspaces.Has(ws.ID) || legacyDeleteMutationWorkspaceIDs.Has(ws.ID)) {
+		if req.ProtocolVersion != 0 || ws.DeletedAt == nil {
+			continue
+		}
+		effect, rejection, lifecycleErr := h.lifecycle.ApplyInTx(
+			ctx, tx, userID, ws.ID, model.WorkspaceLifecycleDelete, 0, seq, now,
+		)
+		if lifecycleErr != nil {
+			respondSyncDatabaseError(c, "legacy workspace delete", userID, []string{ws.ID}, lifecycleErr)
+			return
+		}
+		if rejection != nil {
+			rejected = append(rejected, *rejection)
+			if !legacyMetadataWorkspaceIDSet.Has(ws.ID) {
+				unavailableWorkspaceIDs.Add(ws.ID)
+			}
+			continue
+		}
+		acceptedWorkspaceIDs.Add(ws.ID)
+		ownedWorkspaceIDs.Add(ws.ID)
+		unavailableWorkspaceIDs.Add(ws.ID)
+		deletedLegacyMetadataWorkspaces.Add(ws.ID)
+		legacyDeletedWorkspaceIDs = append(legacyDeletedWorkspaceIDs, ws.ID)
+		searchDeletes = append(searchDeletes, effect.SearchDeletes...)
+		searchUpserts = append(searchUpserts, effect.SearchUpserts...)
+	}
+	for _, ws := range req.Entities.Workspaces {
+		if req.ProtocolVersion == 0 && ws.DeletedAt != nil {
+			continue
+		}
+		if ws.DeletedAt == nil && deletedLegacyMetadataWorkspaces.Has(ws.ID) {
 			rejected = append(rejected, model.Rejected{
 				ID: ws.ID, Reason: model.RejectionReasonWorkspaceDeleted, Type: "workspace",
 			})
 			unavailableWorkspaceIDs.Add(ws.ID)
 			continue
 		}
-		if req.ProtocolVersion == 0 && ws.DeletedAt != nil {
-			effect, rejection, lifecycleErr := h.lifecycle.ApplyInTx(
-				ctx, tx, userID, ws.ID, model.WorkspaceLifecycleDelete, 0, seq, now,
-			)
-			if lifecycleErr != nil {
-				respondSyncDatabaseError(c, "legacy workspace delete", userID, []string{ws.ID}, lifecycleErr)
-				return
-			}
-			if rejection != nil {
-				rejected = append(rejected, *rejection)
-				unavailableWorkspaceIDs.Add(ws.ID)
-				continue
-			}
-			acceptedWorkspaceIDs.Add(ws.ID)
-			ownedWorkspaceIDs.Add(ws.ID)
-			unavailableWorkspaceIDs.Add(ws.ID)
-			deletedLegacyMetadataWorkspaces.Add(ws.ID)
-			legacyDeletedWorkspaceIDs = append(legacyDeletedWorkspaceIDs, ws.ID)
-			searchDeletes = append(searchDeletes, effect.SearchDeletes...)
-			searchUpserts = append(searchUpserts, effect.SearchUpserts...)
-			continue
-		}
-		if ws.DeletedAt == nil && limits.MaxWorkspaces != -1 {
-			if _, exists := activeWSIDs[ws.ID]; !exists {
-				if wsQuotaCount >= limits.MaxWorkspaces {
-					rejected = append(rejected, model.Rejected{ID: ws.ID, Reason: "quota_exceeded", Type: "workspace"})
-					unavailableWorkspaceIDs.Add(ws.ID)
-					continue
-				}
-				wsQuotaCount++
-			}
-		}
-		wsUpserts = append(wsUpserts, ws)
+		queueWorkspaceUpsert(ws)
 	}
 	if len(wsUpserts) > 0 {
 		batch := &pgx.Batch{}

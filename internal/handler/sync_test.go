@@ -356,6 +356,53 @@ func TestSyncPush_LegacyWorkspaceDuplicateDeleteWinsInReverseOrder(t *testing.T)
 	})
 }
 
+func TestSyncPush_LegacyWorkspaceRejectedDeleteAllowsMetadata(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+		email:    "sync-legacy-workspace-rejected-delete@example.com",
+		password: "password123",
+	})
+	insertWorkspaceLifecycleRoot(t, testDB, userID, "sync-legacy-rejected-delete", 0)
+	deletedAt := int64(8000)
+
+	recorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+		Entities: model.SyncPushEntities{
+			Workspaces: []model.SyncWorkspaceMutation{
+				{
+					ID:        "sync-legacy-rejected-delete",
+					Name:      "Rejected delete payload",
+					Position:  98,
+					DeletedAt: &deletedAt,
+				},
+				{
+					ID:        "sync-legacy-rejected-delete",
+					Name:      "Accepted metadata after rejected delete",
+					Position:  99,
+					UpdatedAt: 9000,
+				},
+			},
+		},
+	})
+	assertSyncStatusOK(t, recorder)
+	response := decodeSyncPushResponse(t, recorder)
+	assertRejected(t, response, model.Rejected{
+		ID: "sync-legacy-rejected-delete", Reason: model.RejectionReasonLastActiveWorkspace, Type: "workspace",
+	})
+	if len(response.Rejected) != 1 {
+		t.Fatalf("rejected delete plus metadata rejections = %#v, want only last_active_workspace", response.Rejected)
+	}
+	assertWorkspaceLifecycleRoot(t, testDB, "sync-legacy-rejected-delete", workspaceLifecycleRootExpectation{
+		name:          "Accepted metadata after rejected delete",
+		icon:          nil,
+		color:         nil,
+		position:      99,
+		seq:           response.ServerSeq,
+		isDeleted:     0,
+		deletionModel: 1,
+		deletedAtSet:  false,
+	})
+}
+
 func TestSyncPushRejectsChildrenOfQuotaRejectedWorkspace(t *testing.T) {
 	testDB := openSyncTestDB(t)
 	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-quota@example.com", password: "password123"})
