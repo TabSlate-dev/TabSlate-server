@@ -2,12 +2,15 @@ package handler
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"time"
 
 	"github.com/TabSlate-dev/TabSlate-server/billing"
 	"github.com/TabSlate-dev/TabSlate-server/db"
 	"github.com/TabSlate-dev/TabSlate-server/internal/mailer"
+	"github.com/TabSlate-dev/TabSlate-server/internal/model"
 	"github.com/TabSlate-dev/TabSlate-server/internal/search"
 )
 
@@ -15,6 +18,12 @@ import (
 // It is intentionally fixed (not operator-configurable) — changing it is a protocol decision,
 // not an operational one. Operators should adjust TRASH_GRACE_DAYS instead.
 const tombstoneWindowDays = 7
+
+// CleanupBillingProvider is the billing capability cleanup needs to resolve
+// per-user Workspace retention periods.
+type CleanupBillingProvider interface {
+	GetLimits(ctx context.Context, userID string) (*billing.Limits, error)
+}
 
 // CleanupHandler runs a background goroutine that:
 //   - Phase 1: auto-expires state=1 items to state=2 after the grace period,
@@ -24,7 +33,7 @@ type CleanupHandler struct {
 	db             *db.DB
 	trashGraceDays int
 	mailer         *mailer.Mailer
-	billing        billing.Provider
+	billing        CleanupBillingProvider
 	search         *search.Client
 	lifecycle      *WorkspaceLifecycleService
 }
@@ -33,7 +42,7 @@ func NewCleanupHandler(
 	d *db.DB,
 	trashGraceDays int,
 	m *mailer.Mailer,
-	bp billing.Provider,
+	bp CleanupBillingProvider,
 	sc *search.Client,
 	lifecycle ...*WorkspaceLifecycleService,
 ) *CleanupHandler {
@@ -63,14 +72,102 @@ func (h *CleanupHandler) Run(ctx context.Context) {
 }
 
 func (h *CleanupHandler) runOnce(ctx context.Context) {
-	nowMs := time.Now().UnixMilli()
+	now := time.Now()
+	nowMs := now.UnixMilli()
 	graceMs := int64(h.trashGraceDays) * 24 * 60 * 60 * 1000
 	tombstoneMs := int64(tombstoneWindowDays) * 24 * 60 * 60 * 1000
 
 	h.phase1(ctx, nowMs, graceMs)
+	if err := h.expireWorkspaces(ctx, now); err != nil {
+		log.Printf("cleanup workspace retention: %v", err)
+	}
 	h.phase2(ctx, nowMs, graceMs, tombstoneMs)
 	h.phase3(ctx)
 	h.phase4(ctx)
+}
+
+// expireWorkspaces purges state=1 Workspace roots after the user's plan
+// retention period. The lifecycle service owns the atomic root scrubbing and
+// descendant deletion, so a failed purge remains wholly retryable.
+func (h *CleanupHandler) expireWorkspaces(ctx context.Context, now time.Time) error {
+	type candidate struct {
+		userID      string
+		workspaceID string
+		deletedAt   int64
+	}
+
+	rows, err := h.db.Query(ctx, `
+		SELECT user_id, id, deleted_at
+		FROM workspaces
+		WHERE is_deleted = 1 AND deleted_at IS NOT NULL
+		ORDER BY user_id, id`)
+	if err != nil {
+		return fmt.Errorf("query retained workspaces: %w", err)
+	}
+	defer rows.Close()
+
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.userID, &c.workspaceID, &c.deletedAt); err != nil {
+			return fmt.Errorf("scan retained workspace: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate retained workspaces: %w", err)
+	}
+
+	var failures []error
+	for start := 0; start < len(candidates); {
+		end := start + 1
+		for end < len(candidates) && candidates[end].userID == candidates[start].userID {
+			end++
+		}
+
+		userID := candidates[start].userID
+		limits, err := h.billing.GetLimits(ctx, userID)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("get cleanup limits for %s: %w", userID, err))
+			start = end
+			continue
+		}
+		if limits == nil {
+			failures = append(failures, fmt.Errorf("get cleanup limits for %s: empty limits", userID))
+			start = end
+			continue
+		}
+		if limits.TrashGraceDays < 0 {
+			start = end
+			continue
+		}
+
+		graceMs := int64(limits.TrashGraceDays) * int64(24*time.Hour/time.Millisecond)
+		for _, c := range candidates[start:end] {
+			if c.deletedAt > now.UnixMilli()-graceMs {
+				continue
+			}
+			if h.lifecycle == nil {
+				failures = append(failures, fmt.Errorf("purge workspace %s: lifecycle service is unavailable", c.workspaceID))
+				continue
+			}
+			_, rejection, err := h.lifecycle.Apply(
+				ctx, userID, c.workspaceID, model.WorkspaceLifecyclePurge, 1,
+			)
+			if err != nil {
+				failures = append(failures, fmt.Errorf("purge workspace %s: %w", c.workspaceID, err))
+				continue
+			}
+			if rejection == nil || rejection.Reason == "stale" || rejection.Reason == model.RejectionReasonPermanentlyDeleted {
+				continue
+			}
+			failures = append(failures, fmt.Errorf("purge workspace %s rejected: %s", c.workspaceID, rejection.Reason))
+		}
+
+		start = end
+	}
+
+	return errors.Join(failures...)
 }
 
 // phase1 promotes state=1 items past the grace period to state=2.
@@ -154,6 +251,8 @@ func (h *CleanupHandler) phase1ForUser(ctx context.Context, userID string, thres
 // phase2 hard-deletes state=2 items past the tombstone window.
 // Deletion order: bookmarks first (FK collection_id ON DELETE SET NULL),
 // then collections, then groups (group_tabs cascade automatically via FK).
+// Workspaces are deliberately excluded: state=2 roots are permanent,
+// scrubbed tombstones whose descendants were removed by the lifecycle service.
 func (h *CleanupHandler) phase2(ctx context.Context, nowMs, graceMs, tombstoneMs int64) {
 	cutoff := nowMs - graceMs - tombstoneMs
 
@@ -196,9 +295,9 @@ func (h *CleanupHandler) phase3(ctx context.Context) {
 	defer rows.Close()
 
 	type candidate struct {
-		id                 string
-		name               string
-		email              string
+		id                  string
+		name                string
+		email               string
 		deletionRequestedAt int64
 	}
 	var candidates []candidate

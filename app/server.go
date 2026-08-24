@@ -106,7 +106,8 @@ func New(cfg *Config, database *db.DB, bp billing.Provider, ctx context.Context)
 	s.lifecycle = handler.NewWorkspaceLifecycleService(database, s.infra.Hub, s.search)
 	s.setupCORS()
 	s.setupRoutes()
-	cleanupH := handler.NewCleanupHandler(database, cfg.TrashGraceDays, s.mailer, s.billing, s.search, s.lifecycle)
+	var cleanupBilling handler.CleanupBillingProvider = s.billing
+	cleanupH := handler.NewCleanupHandler(database, cfg.TrashGraceDays, s.mailer, cleanupBilling, s.search, s.lifecycle)
 	go cleanupH.Run(ctx)
 	return s
 }
