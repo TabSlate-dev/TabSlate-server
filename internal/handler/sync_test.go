@@ -247,6 +247,53 @@ func TestSyncPush_LegacyWorkspaceMetadataCannotRestoreParentTombstone(t *testing
 	}
 }
 
+func TestSyncPush_LegacyWorkspaceDuplicateDeleteWins(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+		email:    "sync-legacy-workspace-duplicate-delete@example.com",
+		password: "password123",
+	})
+	insertLegacyWorkspaceLifecycleFixture(t, testDB, userID, "sync-legacy-duplicate", 0, 1, 40)
+	insertWorkspaceLifecycleRoot(t, testDB, userID, "sync-legacy-duplicate-sibling", 0)
+	deletedAt := int64(8000)
+
+	recorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+		Entities: model.SyncPushEntities{
+			Workspaces: []model.SyncWorkspaceMutation{
+				{
+					ID:        "sync-legacy-duplicate",
+					Name:      "Delete payload",
+					Position:  98,
+					DeletedAt: &deletedAt,
+				},
+				{
+					ID:       "sync-legacy-duplicate",
+					Name:     "Must not replace tombstone",
+					Position: 99,
+				},
+			},
+		},
+	})
+	assertSyncStatusOK(t, recorder)
+	response := decodeSyncPushResponse(t, recorder)
+	assertRejected(t, response, model.Rejected{
+		ID: "sync-legacy-duplicate", Reason: model.RejectionReasonWorkspaceDeleted, Type: "workspace",
+	})
+	if len(response.Rejected) != 1 {
+		t.Fatalf("duplicate legacy mutations rejected = %#v, want only workspace_deleted", response.Rejected)
+	}
+	assertWorkspaceLifecycleRoot(t, testDB, "sync-legacy-duplicate", workspaceLifecycleRootExpectation{
+		name:          "Workspace sync-legacy-duplicate",
+		icon:          stringPtr("icon-sync-legacy-duplicate"),
+		color:         stringPtr("color-sync-legacy-duplicate"),
+		position:      17,
+		seq:           response.ServerSeq,
+		isDeleted:     1,
+		deletionModel: 0,
+		deletedAtSet:  true,
+	})
+}
+
 func TestSyncPushRejectsChildrenOfQuotaRejectedWorkspace(t *testing.T) {
 	testDB := openSyncTestDB(t)
 	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-quota@example.com", password: "password123"})
