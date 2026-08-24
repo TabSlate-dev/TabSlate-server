@@ -309,24 +309,29 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	}
 
 	collectionQuota := newRetainedQuota(limits.MaxCollections)
+	quotaCollectionWorkspaceIDs := map[string]string{}
 	if limits.MaxCollections != -1 && len(req.Entities.Collections) > 0 {
 		rows, err := tx.Query(ctx,
-			`SELECT id, updated_at FROM collections WHERE user_id = $1 AND is_deleted < 2`, userID)
+			`SELECT id, updated_at, workspace_id FROM collections WHERE user_id = $1 AND is_deleted < 2`, userID)
 		if err != nil {
 			respondSyncDatabaseError(c, "collection quota query", userID, collectionIDs, err)
 			return
 		}
 		for rows.Next() {
 			var (
-				id        string
-				updatedAt int64
+				id          string
+				updatedAt   int64
+				workspaceID *string
 			)
-			if err := rows.Scan(&id, &updatedAt); err != nil {
+			if err := rows.Scan(&id, &updatedAt, &workspaceID); err != nil {
 				rows.Close()
 				respondSyncDatabaseError(c, "collection quota scan", userID, collectionIDs, err)
 				return
 			}
 			collectionQuota.AddRetained(id, updatedAt)
+			if workspaceID != nil {
+				quotaCollectionWorkspaceIDs[id] = *workspaceID
+			}
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -336,24 +341,29 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	}
 
 	groupQuota := newRetainedQuota(limits.MaxSavedGroups)
+	quotaGroupWorkspaceIDs := map[string]string{}
 	if limits.MaxSavedGroups != -1 && len(req.Entities.Groups) > 0 {
 		rows, err := tx.Query(ctx,
-			`SELECT id, updated_at FROM groups WHERE user_id = $1 AND is_deleted < 2`, userID)
+			`SELECT id, updated_at, workspace_id FROM groups WHERE user_id = $1 AND is_deleted < 2`, userID)
 		if err != nil {
 			respondSyncDatabaseError(c, "saved group quota query", userID, groupIDs, err)
 			return
 		}
 		for rows.Next() {
 			var (
-				id        string
-				updatedAt int64
+				id          string
+				updatedAt   int64
+				workspaceID *string
 			)
-			if err := rows.Scan(&id, &updatedAt); err != nil {
+			if err := rows.Scan(&id, &updatedAt, &workspaceID); err != nil {
 				rows.Close()
 				respondSyncDatabaseError(c, "saved group quota scan", userID, groupIDs, err)
 				return
 			}
 			groupQuota.AddRetained(id, updatedAt)
+			if workspaceID != nil {
+				quotaGroupWorkspaceIDs[id] = *workspaceID
+			}
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -363,24 +373,29 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	}
 
 	bookmarkQuota := newRetainedQuota(limits.MaxBookmarks)
+	quotaBookmarkCollectionIDs := map[string]string{}
 	if limits.MaxBookmarks != -1 && len(req.Entities.Bookmarks) > 0 {
 		rows, err := tx.Query(ctx,
-			`SELECT id, updated_at FROM bookmarks WHERE user_id = $1 AND is_trashed < 2`, userID)
+			`SELECT id, updated_at, collection_id FROM bookmarks WHERE user_id = $1 AND is_trashed < 2`, userID)
 		if err != nil {
 			respondSyncDatabaseError(c, "bookmark quota query", userID, bookmarkIDs, err)
 			return
 		}
 		for rows.Next() {
 			var (
-				id        string
-				updatedAt int64
+				id           string
+				updatedAt    int64
+				collectionID *string
 			)
-			if err := rows.Scan(&id, &updatedAt); err != nil {
+			if err := rows.Scan(&id, &updatedAt, &collectionID); err != nil {
 				rows.Close()
 				respondSyncDatabaseError(c, "bookmark quota scan", userID, bookmarkIDs, err)
 				return
 			}
 			bookmarkQuota.AddRetained(id, updatedAt)
+			if collectionID != nil {
+				quotaBookmarkCollectionIDs[id] = *collectionID
+			}
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -484,6 +499,19 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				unavailableWorkspaceIDs.Set(ws.ID, model.RejectionReasonPermanentlyDeleted)
 				refreshWorkspaceCollections(ws.ID, model.RejectionReasonPermanentlyDeleted)
 				workspaceQuota.ReleaseApplied(ws.ID)
+				for collectionID, workspaceID := range quotaCollectionWorkspaceIDs {
+					if workspaceID == ws.ID {
+						collectionQuota.ReleaseApplied(collectionID)
+					}
+				}
+				for _, bookmarkID := range effect.SearchDeletes {
+					bookmarkQuota.ReleaseApplied(bookmarkID)
+				}
+				for groupID, workspaceID := range quotaGroupWorkspaceIDs {
+					if workspaceID == ws.ID {
+						groupQuota.ReleaseApplied(groupID)
+					}
+				}
 			}
 			continue
 		}
@@ -652,6 +680,15 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			if closeErr := cbr.Close(); closeErr != nil {
 				respondSyncDatabaseError(c, "close bookmark cascade batch", userID, cascadeIDs, closeErr)
 				return
+			}
+			cascadeCollectionIDs := entityIDSet{}
+			for _, collectionID := range cascadeIDs {
+				cascadeCollectionIDs.Add(collectionID)
+			}
+			for bookmarkID, collectionID := range quotaBookmarkCollectionIDs {
+				if cascadeCollectionIDs.Has(collectionID) {
+					bookmarkQuota.ReleaseApplied(bookmarkID)
+				}
 			}
 		}
 	}

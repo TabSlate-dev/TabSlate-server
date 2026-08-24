@@ -602,6 +602,81 @@ func TestSyncPushTerminalMutationsReleaseQuotaWithinBatch(t *testing.T) {
 	})
 }
 
+func TestSyncPushWorkspacePurgeReleasesDescendantQuotaWithinBatch(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+		email: "sync-purge-descendant-quota@example.com", password: "password123",
+	})
+	insertWorkspaceLifecycleFixture(t, testDB, userID, "purge-descendant-source", 1)
+	insertWorkspaceLifecycleRoot(t, testDB, userID, "purge-descendant-target", 0)
+	targetWorkspaceID := "purge-descendant-target"
+	limits := syncTestLimits()
+	limits.MaxCollections = 1
+	limits.MaxBookmarks = 3
+	limits.MaxSavedGroups = 1
+
+	recorder := pushSyncRequest(t, testDB, userID, limits, model.SyncPushRequest{
+		ProtocolVersion: 2,
+		Entities: model.SyncPushEntities{
+			Workspaces: []model.SyncWorkspaceMutation{{
+				ID: "purge-descendant-source", LifecycleAction: model.WorkspaceLifecyclePurge,
+			}},
+			Collections: []model.Collection{{
+				ID: "purge-replacement-collection", WorkspaceID: &targetWorkspaceID, Name: "Replacement Collection",
+			}},
+			Bookmarks: []model.Bookmark{{
+				ID: "purge-replacement-bookmark", Title: "Replacement Bookmark", URL: "https://replacement.example.com",
+			}},
+			Groups: []model.Group{{
+				ID: "purge-replacement-group", WorkspaceID: &targetWorkspaceID, Name: "Replacement Group", Color: "blue",
+			}},
+		},
+	})
+	assertSyncStatusOK(t, recorder)
+	if rejected := decodeSyncPushResponse(t, recorder).Rejected; len(rejected) != 0 {
+		t.Fatalf("rejected = %#v, want Workspace purge to release descendant quotas", rejected)
+	}
+	assertEntityCount(t, testDB, `SELECT COUNT(*) FROM collections WHERE user_id = '`+userID+`' AND is_deleted < 2`, 1)
+	assertEntityCount(t, testDB, `SELECT COUNT(*) FROM bookmarks WHERE user_id = '`+userID+`' AND is_trashed < 2`, 1)
+	assertEntityCount(t, testDB, `SELECT COUNT(*) FROM groups WHERE user_id = '`+userID+`' AND is_deleted < 2`, 1)
+}
+
+func TestSyncPushTerminalCollectionReleasesCascadedBookmarkQuotaWithinBatch(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+		email: "sync-collection-cascade-quota@example.com", password: "password123",
+	})
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO collections (id, user_id, name, icon, position, seq, deleted_at, is_deleted, created_at, updated_at)
+		VALUES ('cascade-quota-collection', $1, 'Cascade source', '', 0, 1, 1, 1, 1, 1)`, userID); err != nil {
+		t.Fatalf("insert cascade source Collection: %v", err)
+	}
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO bookmarks
+			(id, user_id, collection_id, title, url, favicon_url, description, position, seq, is_trashed, created_at, updated_at)
+		VALUES ('cascade-quota-bookmark', $1, 'cascade-quota-collection', 'Cascade source',
+			'https://cascade.example.com', '', '', 0, 1, 0, 1, 1)`, userID); err != nil {
+		t.Fatalf("insert cascaded Bookmark: %v", err)
+	}
+	limits := syncTestLimits()
+	limits.MaxBookmarks = 1
+
+	recorder := pushSync(t, testDB, userID, limits, model.SyncPushEntities{
+		Collections: []model.Collection{{
+			ID: "cascade-quota-collection", Name: "Terminal", IsDeleted: 2,
+		}},
+		Bookmarks: []model.Bookmark{{
+			ID: "cascade-replacement-bookmark", Title: "Replacement", URL: "https://replacement.example.com",
+		}},
+	})
+	assertSyncStatusOK(t, recorder)
+	if rejected := decodeSyncPushResponse(t, recorder).Rejected; len(rejected) != 0 {
+		t.Fatalf("rejected = %#v, want Collection cascade to release Bookmark quota", rejected)
+	}
+	assertEntityCount(t, testDB, `SELECT COUNT(*) FROM bookmarks WHERE user_id = '`+userID+`' AND is_trashed < 2`, 1)
+	assertEntityCount(t, testDB, `SELECT COUNT(*) FROM bookmarks WHERE id = 'cascade-quota-bookmark' AND is_trashed = 2`, 1)
+}
+
 func TestSyncPullWorkspaceLifecycleStatesRetainDescendantsAndCapability(t *testing.T) {
 	testDB := openSyncTestDB(t)
 	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-pull-lifecycle@example.com", password: "password123"})
