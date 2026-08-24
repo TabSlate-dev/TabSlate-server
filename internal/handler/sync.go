@@ -155,6 +155,8 @@ func (h *SyncHandler) Push(c *gin.Context) {
 
 	ownedCollectionIDs := entityIDSet{}
 	unavailableCollectionIDs := parentAvailability{}
+	collectionStates := map[string]int{}
+	collectionWorkspaceIDs := map[string]string{}
 	if len(req.Entities.Bookmarks) > 0 {
 		rows, queryErr := tx.Query(ctx, `
 			SELECT c.id, c.is_deleted, c.workspace_id, w.is_deleted
@@ -176,6 +178,10 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				rows.Close()
 				respondSyncDatabaseError(c, "collection parent scan", userID, bookmarkIDs, scanErr)
 				return
+			}
+			collectionStates[id] = isDeleted
+			if workspaceID != nil {
+				collectionWorkspaceIDs[id] = *workspaceID
 			}
 			if req.ProtocolVersion != 2 {
 				ownedCollectionIDs.Add(id)
@@ -207,6 +213,24 @@ func (h *SyncHandler) Push(c *gin.Context) {
 
 	acceptedWorkspaceIDs := entityIDSet{}
 	acceptedCollectionIDs := entityIDSet{}
+	refreshWorkspaceCollections := func(workspaceID string, workspaceReason string) {
+		for collectionID, parentWorkspaceID := range collectionWorkspaceIDs {
+			if parentWorkspaceID != workspaceID {
+				continue
+			}
+			ownedCollectionIDs.Delete(collectionID)
+			acceptedCollectionIDs.Delete(collectionID)
+			switch {
+			case workspaceReason == model.RejectionReasonPermanentlyDeleted || collectionStates[collectionID] == 2:
+				unavailableCollectionIDs.Set(collectionID, model.RejectionReasonPermanentlyDeleted)
+			case workspaceReason == model.RejectionReasonParentDeleted || collectionStates[collectionID] == 1:
+				unavailableCollectionIDs.Set(collectionID, model.RejectionReasonParentDeleted)
+			default:
+				ownedCollectionIDs.Add(collectionID)
+				unavailableCollectionIDs.Delete(collectionID)
+			}
+		}
+	}
 	var searchUpserts []search.BookmarkDoc
 	var searchDeletes []string
 
@@ -257,123 +281,122 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	// One query per quota-limited entity type, regardless of push size.
 	// Replaces the previous O(n) per-entity COUNT(*) pattern.
 
-	activeWSIDs := make(map[string]struct{})
-	wsQuotaCount := 0
+	workspaceQuota := newRetainedQuota(limits.MaxWorkspaces)
 	if limits.MaxWorkspaces != -1 && len(req.Entities.Workspaces) > 0 {
 		rows, err := tx.Query(ctx,
-			`SELECT id FROM workspaces WHERE user_id = $1 AND is_deleted < 2`, userID)
+			`SELECT id, updated_at FROM workspaces WHERE user_id = $1 AND is_deleted < 2`, userID)
 		if err != nil {
 			respondSyncDatabaseError(c, "workspace quota query", userID, workspaceIDs, err)
 			return
 		}
 		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
+			var (
+				id        string
+				updatedAt int64
+			)
+			if err := rows.Scan(&id, &updatedAt); err != nil {
 				rows.Close()
 				respondSyncDatabaseError(c, "workspace quota scan", userID, workspaceIDs, err)
 				return
 			}
-			activeWSIDs[id] = struct{}{}
+			workspaceQuota.AddRetained(id, updatedAt)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
 			respondSyncDatabaseError(c, "workspace quota iteration", userID, workspaceIDs, err)
 			return
 		}
-		wsQuotaCount = len(activeWSIDs)
 	}
 
-	activeColIDs := make(map[string]struct{})
-	colQuotaCount := 0
+	collectionQuota := newRetainedQuota(limits.MaxCollections)
 	if limits.MaxCollections != -1 && len(req.Entities.Collections) > 0 {
 		rows, err := tx.Query(ctx,
-			`SELECT id FROM collections WHERE user_id = $1 AND is_deleted < 2`, userID)
+			`SELECT id, updated_at FROM collections WHERE user_id = $1 AND is_deleted < 2`, userID)
 		if err != nil {
 			respondSyncDatabaseError(c, "collection quota query", userID, collectionIDs, err)
 			return
 		}
 		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
+			var (
+				id        string
+				updatedAt int64
+			)
+			if err := rows.Scan(&id, &updatedAt); err != nil {
 				rows.Close()
 				respondSyncDatabaseError(c, "collection quota scan", userID, collectionIDs, err)
 				return
 			}
-			activeColIDs[id] = struct{}{}
+			collectionQuota.AddRetained(id, updatedAt)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
 			respondSyncDatabaseError(c, "collection quota iteration", userID, collectionIDs, err)
 			return
 		}
-		colQuotaCount = len(activeColIDs)
 	}
 
-	activeGroupIDs := make(map[string]struct{})
-	groupQuotaCount := 0
+	groupQuota := newRetainedQuota(limits.MaxSavedGroups)
 	if limits.MaxSavedGroups != -1 && len(req.Entities.Groups) > 0 {
 		rows, err := tx.Query(ctx,
-			`SELECT id FROM groups WHERE user_id = $1 AND is_deleted < 2`, userID)
+			`SELECT id, updated_at FROM groups WHERE user_id = $1 AND is_deleted < 2`, userID)
 		if err != nil {
 			respondSyncDatabaseError(c, "saved group quota query", userID, groupIDs, err)
 			return
 		}
 		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
+			var (
+				id        string
+				updatedAt int64
+			)
+			if err := rows.Scan(&id, &updatedAt); err != nil {
 				rows.Close()
 				respondSyncDatabaseError(c, "saved group quota scan", userID, groupIDs, err)
 				return
 			}
-			activeGroupIDs[id] = struct{}{}
+			groupQuota.AddRetained(id, updatedAt)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
 			respondSyncDatabaseError(c, "saved group quota iteration", userID, groupIDs, err)
 			return
 		}
-		groupQuotaCount = len(activeGroupIDs)
 	}
 
-	activeBookmarkIDs := make(map[string]struct{})
-	bookmarkQuotaCount := 0
+	bookmarkQuota := newRetainedQuota(limits.MaxBookmarks)
 	if limits.MaxBookmarks != -1 && len(req.Entities.Bookmarks) > 0 {
 		rows, err := tx.Query(ctx,
-			`SELECT id FROM bookmarks WHERE user_id = $1 AND is_trashed < 2`, userID)
+			`SELECT id, updated_at FROM bookmarks WHERE user_id = $1 AND is_trashed < 2`, userID)
 		if err != nil {
 			respondSyncDatabaseError(c, "bookmark quota query", userID, bookmarkIDs, err)
 			return
 		}
 		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
+			var (
+				id        string
+				updatedAt int64
+			)
+			if err := rows.Scan(&id, &updatedAt); err != nil {
 				rows.Close()
 				respondSyncDatabaseError(c, "bookmark quota scan", userID, bookmarkIDs, err)
 				return
 			}
-			activeBookmarkIDs[id] = struct{}{}
+			bookmarkQuota.AddRetained(id, updatedAt)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
 			respondSyncDatabaseError(c, "bookmark quota iteration", userID, bookmarkIDs, err)
 			return
 		}
-		bookmarkQuotaCount = len(activeBookmarkIDs)
 	}
 
 	// ── Workspaces ────────────────────────────────────────────────────────────
 	var wsUpserts []model.SyncWorkspaceMutation
 	legacyDeletedWorkspaceIDs := []string{}
 	queueWorkspaceUpsert := func(ws model.SyncWorkspaceMutation) {
-		if limits.MaxWorkspaces != -1 {
-			if _, exists := activeWSIDs[ws.ID]; !exists {
-				if wsQuotaCount >= limits.MaxWorkspaces {
-					rejected = append(rejected, model.Rejected{ID: ws.ID, Reason: "quota_exceeded", Type: "workspace"})
-					unavailableWorkspaceIDs.Set(ws.ID, "parent_rejected")
-					return
-				}
-				wsQuotaCount++
-			}
+		if !workspaceQuota.Admit(ws.ID, false, now) {
+			rejected = append(rejected, model.Rejected{ID: ws.ID, Reason: "quota_exceeded", Type: "workspace"})
+			unavailableWorkspaceIDs.Set(ws.ID, "parent_rejected")
+			return
 		}
 		wsUpserts = append(wsUpserts, ws)
 	}
@@ -449,14 +472,18 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				ownedWorkspaceIDs.Delete(ws.ID)
 				acceptedWorkspaceIDs.Delete(ws.ID)
 				unavailableWorkspaceIDs.Set(ws.ID, model.RejectionReasonParentDeleted)
+				refreshWorkspaceCollections(ws.ID, model.RejectionReasonParentDeleted)
 			case model.WorkspaceLifecycleRestore:
 				ownedWorkspaceIDs.Add(ws.ID)
 				acceptedWorkspaceIDs.Add(ws.ID)
 				unavailableWorkspaceIDs.Delete(ws.ID)
+				refreshWorkspaceCollections(ws.ID, "")
 			case model.WorkspaceLifecyclePurge:
 				ownedWorkspaceIDs.Delete(ws.ID)
 				acceptedWorkspaceIDs.Delete(ws.ID)
 				unavailableWorkspaceIDs.Set(ws.ID, model.RejectionReasonPermanentlyDeleted)
+				refreshWorkspaceCollections(ws.ID, model.RejectionReasonPermanentlyDeleted)
+				workspaceQuota.ReleaseApplied(ws.ID)
 			}
 			continue
 		}
@@ -541,18 +568,15 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			ownedWorkspaceIDs, acceptedWorkspaceIDs, unavailableWorkspaceIDs,
 		); dependency != nil {
 			rejected = append(rejected, *dependency)
-			unavailableCollectionIDs.Set(col.ID, dependency.Reason)
+			if _, inheritedLifecycleReason := unavailableCollectionIDs[col.ID]; !inheritedLifecycleReason {
+				unavailableCollectionIDs.Set(col.ID, "parent_rejected")
+			}
 			continue
 		}
-		if col.IsDeleted < 2 && limits.MaxCollections != -1 {
-			if _, exists := activeColIDs[col.ID]; !exists {
-				if colQuotaCount >= limits.MaxCollections {
-					rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "quota_exceeded", Type: "collection"})
-					unavailableCollectionIDs.Set(col.ID, "parent_rejected")
-					continue
-				}
-				colQuotaCount++
-			}
+		if !collectionQuota.Admit(col.ID, col.IsDeleted == 2, now) {
+			rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "quota_exceeded", Type: "collection"})
+			unavailableCollectionIDs.Set(col.ID, "parent_rejected")
+			continue
 		}
 		colUpserts = append(colUpserts, col)
 	}
@@ -642,16 +666,11 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			rejected = append(rejected, *dependency)
 			continue
 		}
-		if bookmark.IsTrashed < 2 && limits.MaxBookmarks != -1 {
-			if _, exists := activeBookmarkIDs[bookmark.ID]; !exists {
-				if bookmarkQuotaCount >= limits.MaxBookmarks {
-					rejected = append(rejected, model.Rejected{
-						ID: bookmark.ID, Reason: "quota_exceeded", Type: "bookmark",
-					})
-					continue
-				}
-				bookmarkQuotaCount++
-			}
+		if !bookmarkQuota.Admit(bookmark.ID, bookmark.IsTrashed == 2, now) {
+			rejected = append(rejected, model.Rejected{
+				ID: bookmark.ID, Reason: "quota_exceeded", Type: "bookmark",
+			})
+			continue
 		}
 		bookmarkUpserts = append(bookmarkUpserts, bookmark)
 	}
@@ -745,14 +764,9 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			rejected = append(rejected, *dependency)
 			continue
 		}
-		if g.IsDeleted < 2 && limits.MaxSavedGroups != -1 {
-			if _, exists := activeGroupIDs[g.ID]; !exists {
-				if groupQuotaCount >= limits.MaxSavedGroups {
-					rejected = append(rejected, model.Rejected{ID: g.ID, Reason: "quota_exceeded", Type: "saved_group"})
-					continue
-				}
-				groupQuotaCount++
-			}
+		if !groupQuota.Admit(g.ID, g.IsDeleted == 2, now) {
+			rejected = append(rejected, model.Rejected{ID: g.ID, Reason: "quota_exceeded", Type: "saved_group"})
+			continue
 		}
 		groupUpserts = append(groupUpserts, g)
 	}

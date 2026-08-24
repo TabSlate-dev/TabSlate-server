@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"github.com/TabSlate-dev/TabSlate-server/internal/model"
 	"github.com/TabSlate-dev/TabSlate-server/internal/pubsub"
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 )
 
 type fixedLimitsProvider struct {
@@ -360,6 +362,244 @@ func TestSyncPushV2WorkspacePurgeIsIdempotent(t *testing.T) {
 		t.Fatalf("repeated purge rejected = %#v, want idempotent success", rejected)
 	}
 	assertWorkspaceLifecycleDescendantCounts(t, testDB, "v2-purge", workspaceLifecycleDescendantCounts{})
+}
+
+func TestSyncPushV2WorkspaceLifecycleActionsRefreshBookmarkParent(t *testing.T) {
+	tests := []struct {
+		name             string
+		initialState     int
+		action           model.WorkspaceLifecycleAction
+		wantReason       string
+		wantBookmark     bool
+		wantBookmarkName string
+	}{
+		{
+			name: "delete rejects direct Bookmark mutation", initialState: 0,
+			action: model.WorkspaceLifecycleDelete, wantReason: model.RejectionReasonParentDeleted,
+			wantBookmark: true, wantBookmarkName: "Before lifecycle",
+		},
+		{
+			name: "restore accepts direct Bookmark mutation", initialState: 1,
+			action: model.WorkspaceLifecycleRestore, wantBookmark: true, wantBookmarkName: "After lifecycle",
+		},
+		{
+			name: "purge rejects direct Bookmark mutation as terminal", initialState: 1,
+			action: model.WorkspaceLifecyclePurge, wantReason: model.RejectionReasonPermanentlyDeleted,
+			wantBookmark: false,
+		},
+	}
+
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			testDB := openSyncTestDB(t)
+			userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+				email: fmt.Sprintf("sync-action-bookmark-%d@example.com", index), password: "password123",
+			})
+			workspaceID := fmt.Sprintf("action-bookmark-workspace-%d", index)
+			collectionID := fmt.Sprintf("action-bookmark-collection-%d", index)
+			bookmarkID := fmt.Sprintf("action-bookmark-%d", index)
+			insertWorkspaceLifecycleRoot(t, testDB, userID, workspaceID, test.initialState)
+			if test.action == model.WorkspaceLifecycleDelete {
+				insertWorkspaceLifecycleRoot(t, testDB, userID, workspaceID+"-sibling", 0)
+			}
+			if _, err := testDB.Exec(t.Context(), `
+				INSERT INTO collections (id, user_id, workspace_id, name, icon, position, seq, is_deleted, created_at, updated_at)
+				VALUES ($1, $2, $3, 'Lifecycle collection', '', 0, 1, 0, 1, 1)`,
+				collectionID, userID, workspaceID,
+			); err != nil {
+				t.Fatalf("insert lifecycle collection: %v", err)
+			}
+			if _, err := testDB.Exec(t.Context(), `
+				INSERT INTO bookmarks
+					(id, user_id, collection_id, title, url, favicon_url, description, position, seq, is_trashed, created_at, updated_at)
+				VALUES ($1, $2, $3, 'Before lifecycle', 'https://lifecycle.example.com', '', '', 0, 1, 0, 1, 1)`,
+				bookmarkID, userID, collectionID,
+			); err != nil {
+				t.Fatalf("insert lifecycle bookmark: %v", err)
+			}
+
+			recorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+				ProtocolVersion: 2,
+				Entities: model.SyncPushEntities{
+					Workspaces: []model.SyncWorkspaceMutation{{ID: workspaceID, LifecycleAction: test.action}},
+					Bookmarks: []model.Bookmark{{
+						ID: bookmarkID, CollectionID: &collectionID, Title: "After lifecycle",
+						URL: "https://lifecycle.example.com",
+					}},
+				},
+			})
+			assertSyncStatusOK(t, recorder)
+			response := decodeSyncPushResponse(t, recorder)
+			if test.wantReason == "" {
+				if len(response.Rejected) != 0 {
+					t.Fatalf("rejected = %#v, want none", response.Rejected)
+				}
+			} else {
+				assertRejected(t, response, model.Rejected{
+					ID: bookmarkID, Reason: test.wantReason, Type: "bookmark",
+					ParentID: collectionID, ParentType: "collection",
+				})
+				if len(response.Rejected) != 1 {
+					t.Fatalf("rejected = %#v, want one Bookmark lifecycle rejection", response.Rejected)
+				}
+			}
+
+			var bookmarkName string
+			err := testDB.QueryRow(t.Context(), `SELECT title FROM bookmarks WHERE id = $1`, bookmarkID).Scan(&bookmarkName)
+			if !test.wantBookmark {
+				if !errors.Is(err, pgx.ErrNoRows) {
+					t.Fatalf("purged Bookmark query error = %v, want no rows", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("query lifecycle Bookmark: %v", err)
+			}
+			if bookmarkName != test.wantBookmarkName {
+				t.Fatalf("Bookmark title = %q, want %q", bookmarkName, test.wantBookmarkName)
+			}
+		})
+	}
+}
+
+func TestSyncPushBookmarkUsesParentRejectedWhenCollectionRejectedInRequest(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+		email: "sync-collection-rejected-bookmark@example.com", password: "password123",
+	})
+	missingWorkspaceID := "missing-workspace"
+	collectionID := "collection-with-invalid-workspace"
+
+	recorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+		ProtocolVersion: 2,
+		Entities: model.SyncPushEntities{
+			Collections: []model.Collection{{
+				ID: collectionID, WorkspaceID: &missingWorkspaceID, Name: "Rejected collection",
+			}},
+			Bookmarks: []model.Bookmark{{
+				ID: "bookmark-with-rejected-collection", CollectionID: &collectionID,
+				Title: "Rejected Bookmark", URL: "https://rejected.example.com",
+			}},
+		},
+	})
+	assertSyncStatusOK(t, recorder)
+	response := decodeSyncPushResponse(t, recorder)
+	assertRejected(t, response, model.Rejected{
+		ID: collectionID, Reason: "invalid_parent", Type: "collection",
+		ParentID: missingWorkspaceID, ParentType: "workspace",
+	})
+	assertRejected(t, response, model.Rejected{
+		ID: "bookmark-with-rejected-collection", Reason: "parent_rejected", Type: "bookmark",
+		ParentID: collectionID, ParentType: "collection",
+	})
+	if len(response.Rejected) != 2 {
+		t.Fatalf("rejected = %#v, want Collection invalid_parent and Bookmark parent_rejected", response.Rejected)
+	}
+}
+
+func TestSyncPushTerminalMutationsReleaseQuotaWithinBatch(t *testing.T) {
+	t.Run("workspace purge", func(t *testing.T) {
+		testDB := openSyncTestDB(t)
+		userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+			email: "sync-batch-workspace-quota@example.com", password: "password123",
+		})
+		insertWorkspaceLifecycleRoot(t, testDB, userID, "batch-workspace-retained", 1)
+		limits := syncTestLimits()
+		limits.MaxWorkspaces = 1
+
+		recorder := pushSyncRequest(t, testDB, userID, limits, model.SyncPushRequest{
+			ProtocolVersion: 2,
+			Entities: model.SyncPushEntities{Workspaces: []model.SyncWorkspaceMutation{
+				{ID: "batch-workspace-retained", LifecycleAction: model.WorkspaceLifecyclePurge},
+				{ID: "batch-workspace-created", Name: "Created after purge"},
+			}},
+		})
+		assertSyncStatusOK(t, recorder)
+		if rejected := decodeSyncPushResponse(t, recorder).Rejected; len(rejected) != 0 {
+			t.Fatalf("rejected = %#v, want purge to release Workspace quota", rejected)
+		}
+		assertEntityCount(t, testDB, `SELECT COUNT(*) FROM workspaces WHERE user_id = '`+userID+`' AND is_deleted < 2`, 1)
+	})
+
+	t.Run("terminal collection", func(t *testing.T) {
+		testDB := openSyncTestDB(t)
+		userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+			email: "sync-batch-collection-quota@example.com", password: "password123",
+		})
+		if _, err := testDB.Exec(t.Context(), `
+			INSERT INTO collections (id, user_id, name, icon, position, seq, is_deleted, created_at, updated_at)
+			VALUES ('batch-collection-retained', $1, 'Retained', '', 0, 1, 1, 1, 1)`, userID); err != nil {
+			t.Fatalf("insert retained Collection: %v", err)
+		}
+		limits := syncTestLimits()
+		limits.MaxCollections = 1
+
+		recorder := pushSync(t, testDB, userID, limits, model.SyncPushEntities{
+			Collections: []model.Collection{
+				{ID: "batch-collection-retained", Name: "Terminal", IsDeleted: 2},
+				{ID: "batch-collection-created", Name: "Created after terminal"},
+			},
+		})
+		assertSyncStatusOK(t, recorder)
+		if rejected := decodeSyncPushResponse(t, recorder).Rejected; len(rejected) != 0 {
+			t.Fatalf("rejected = %#v, want terminal Collection to release quota", rejected)
+		}
+		assertEntityCount(t, testDB, `SELECT COUNT(*) FROM collections WHERE user_id = '`+userID+`' AND is_deleted < 2`, 1)
+	})
+
+	t.Run("terminal bookmark", func(t *testing.T) {
+		testDB := openSyncTestDB(t)
+		userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+			email: "sync-batch-bookmark-quota@example.com", password: "password123",
+		})
+		if _, err := testDB.Exec(t.Context(), `
+			INSERT INTO bookmarks (id, user_id, title, url, favicon_url, description, position, seq, is_trashed, created_at, updated_at)
+			VALUES ('batch-bookmark-retained', $1, 'Retained', 'https://retained.example.com', '', '', 0, 1, 1, 1, 1)`, userID); err != nil {
+			t.Fatalf("insert retained Bookmark: %v", err)
+		}
+		limits := syncTestLimits()
+		limits.MaxBookmarks = 1
+
+		recorder := pushSync(t, testDB, userID, limits, model.SyncPushEntities{
+			Bookmarks: []model.Bookmark{
+				{ID: "batch-bookmark-retained", Title: "Terminal", URL: "https://retained.example.com", IsTrashed: 2},
+				{ID: "batch-bookmark-created", Title: "Created", URL: "https://created.example.com"},
+			},
+		})
+		assertSyncStatusOK(t, recorder)
+		if rejected := decodeSyncPushResponse(t, recorder).Rejected; len(rejected) != 0 {
+			t.Fatalf("rejected = %#v, want terminal Bookmark to release quota", rejected)
+		}
+		assertEntityCount(t, testDB, `SELECT COUNT(*) FROM bookmarks WHERE user_id = '`+userID+`' AND is_trashed < 2`, 1)
+	})
+
+	t.Run("terminal saved group", func(t *testing.T) {
+		testDB := openSyncTestDB(t)
+		userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+			email: "sync-batch-group-quota@example.com", password: "password123",
+		})
+		insertWorkspaceLifecycleRoot(t, testDB, userID, "batch-group-workspace", 0)
+		workspaceID := "batch-group-workspace"
+		if _, err := testDB.Exec(t.Context(), `
+			INSERT INTO groups (id, user_id, workspace_id, name, color, seq, is_deleted, created_at, updated_at)
+			VALUES ('batch-group-retained', $1, $2, 'Retained', 'blue', 1, 1, 1, 1)`, userID, workspaceID); err != nil {
+			t.Fatalf("insert retained Saved Group: %v", err)
+		}
+		limits := syncTestLimits()
+		limits.MaxSavedGroups = 1
+
+		recorder := pushSync(t, testDB, userID, limits, model.SyncPushEntities{
+			Groups: []model.Group{
+				{ID: "batch-group-retained", WorkspaceID: &workspaceID, Name: "Terminal", Color: "blue", IsDeleted: 2},
+				{ID: "batch-group-created", WorkspaceID: &workspaceID, Name: "Created", Color: "blue"},
+			},
+		})
+		assertSyncStatusOK(t, recorder)
+		if rejected := decodeSyncPushResponse(t, recorder).Rejected; len(rejected) != 0 {
+			t.Fatalf("rejected = %#v, want terminal Saved Group to release quota", rejected)
+		}
+		assertEntityCount(t, testDB, `SELECT COUNT(*) FROM groups WHERE user_id = '`+userID+`' AND is_deleted < 2`, 1)
+	})
 }
 
 func TestSyncPullWorkspaceLifecycleStatesRetainDescendantsAndCapability(t *testing.T) {

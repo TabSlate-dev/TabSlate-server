@@ -5,6 +5,67 @@ import "github.com/TabSlate-dev/TabSlate-server/internal/model"
 type entityIDSet map[string]struct{}
 type parentAvailability map[string]string
 
+type retainedQuota struct {
+	limit             int
+	count             int
+	retainedUpdatedAt map[string]int64
+	seen              entityIDSet
+}
+
+func newRetainedQuota(limit int) *retainedQuota {
+	return &retainedQuota{
+		limit:             limit,
+		retainedUpdatedAt: map[string]int64{},
+		seen:              entityIDSet{},
+	}
+}
+
+func (quota *retainedQuota) AddRetained(id string, updatedAt int64) {
+	quota.retainedUpdatedAt[id] = updatedAt
+	quota.count++
+}
+
+func (quota *retainedQuota) Admit(id string, terminal bool, now int64) bool {
+	if quota.limit == -1 {
+		return true
+	}
+	if quota.seen.Has(id) {
+		return true
+	}
+
+	if terminal {
+		if updatedAt, exists := quota.retainedUpdatedAt[id]; exists && updatedAt < now {
+			delete(quota.retainedUpdatedAt, id)
+			quota.count--
+		}
+		quota.seen.Add(id)
+		return true
+	}
+
+	if _, exists := quota.retainedUpdatedAt[id]; exists {
+		quota.seen.Add(id)
+		return true
+	}
+	if quota.count >= quota.limit {
+		return false
+	}
+	quota.retainedUpdatedAt[id] = now
+	quota.count++
+	quota.seen.Add(id)
+	return true
+}
+
+func (quota *retainedQuota) ReleaseApplied(id string) {
+	if quota.limit == -1 {
+		return
+	}
+	if _, exists := quota.retainedUpdatedAt[id]; !exists {
+		return
+	}
+	delete(quota.retainedUpdatedAt, id)
+	quota.count--
+}
+
 func staleRejection(entityID string, entityType string) model.Rejected {
 	return model.Rejected{ID: entityID, Reason: "stale", Type: entityType}
 }
