@@ -96,6 +96,9 @@ func TestSyncPullCapabilities(t *testing.T) {
 	testDB := openSyncTestDB(t)
 	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-pull-capabilities@example.com", password: "password123"})
 	deletedAt := int64(123)
+	if _, err := testDB.Exec(t.Context(), `INSERT INTO user_sync_seq (user_id, seq) VALUES ($1, 1)`, userID); err != nil {
+		t.Fatalf("insert user sync sequence: %v", err)
+	}
 	if _, err := testDB.Exec(t.Context(), `
 		INSERT INTO workspaces (id, user_id, name, icon, color, position, seq, deleted_at, is_deleted, deletion_model, created_at, updated_at)
 		VALUES ('parent-tombstone', $1, 'Deleted', NULL, NULL, 0, 1, $2, 2, 1, 1, 1)`, userID, deletedAt); err != nil {
