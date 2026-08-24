@@ -30,6 +30,7 @@ type Server struct {
 	captcha      *captcha.Verifier
 	mailer       *mailer.Mailer
 	search       *search.Client
+	lifecycle    *handler.WorkspaceLifecycleService
 	router       *gin.Engine
 	ctx          context.Context
 	infra        *infra.Providers
@@ -102,9 +103,10 @@ func New(cfg *Config, database *db.DB, bp billing.Provider, ctx context.Context)
 		infra:        infraProviders,
 		infraCleanup: infraCleanup,
 	}
+	s.lifecycle = handler.NewWorkspaceLifecycleService(database, s.infra.Hub, s.search)
 	s.setupCORS()
 	s.setupRoutes()
-	cleanupH := handler.NewCleanupHandler(database, cfg.TrashGraceDays, s.mailer, s.billing, s.search)
+	cleanupH := handler.NewCleanupHandler(database, cfg.TrashGraceDays, s.mailer, s.billing, s.search, s.lifecycle)
 	go cleanupH.Run(ctx)
 	return s
 }
@@ -208,11 +210,11 @@ func (s *Server) setupRoutes() {
 		s.cfg.OTPCaptchaThreshold, s.cfg.OTPCaptchaWindow,
 		s.cfg.AllowRegistration)
 	captchaH := handler.NewCaptchaHandler(s.cfg.ProsopoBundleURL)
-	wsH := handler.NewWorkspaceHandler(s.db, s.infra.Hub, s.billing)
+	wsH := handler.NewWorkspaceHandler(s.db, s.infra.Hub, s.billing, s.lifecycle)
 	colH := handler.NewCollectionHandler(s.db, s.infra.Hub, s.billing)
 	bmH := handler.NewBookmarkHandler(s.db, s.search, s.infra.Hub, s.billing)
 	tagH := handler.NewTagHandler(s.db, s.infra.Hub, s.billing)
-	syncH := handler.NewSyncHandler(s.db, s.search, s.infra.Hub, s.billing)
+	syncH := handler.NewSyncHandler(s.db, s.search, s.infra.Hub, s.billing, s.lifecycle)
 	searchH := handler.NewSearchHandler(s.search)
 	sseH := handler.NewSSEHandler(s.infra.Hub, s.infra.Cache)
 	billH := handler.NewBillingHandler(s.billing, s.infra.Cache, s.db)

@@ -26,15 +26,24 @@ type CleanupHandler struct {
 	mailer         *mailer.Mailer
 	billing        billing.Provider
 	search         *search.Client
+	lifecycle      *WorkspaceLifecycleService
 }
 
-func NewCleanupHandler(d *db.DB, trashGraceDays int, m *mailer.Mailer, bp billing.Provider, sc *search.Client) *CleanupHandler {
+func NewCleanupHandler(
+	d *db.DB,
+	trashGraceDays int,
+	m *mailer.Mailer,
+	bp billing.Provider,
+	sc *search.Client,
+	lifecycle ...*WorkspaceLifecycleService,
+) *CleanupHandler {
 	return &CleanupHandler{
 		db:             d,
 		trashGraceDays: trashGraceDays,
 		mailer:         m,
 		billing:        bp,
 		search:         sc,
+		lifecycle:      firstWorkspaceLifecycleService(lifecycle),
 	}
 }
 

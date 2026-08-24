@@ -17,14 +17,27 @@ import (
 )
 
 type SyncHandler struct {
-	db      *db.DB
-	search  *search.Client
-	hub     pubsub.Hub
-	billing billing.Provider
+	db        *db.DB
+	search    *search.Client
+	hub       pubsub.Hub
+	billing   billing.Provider
+	lifecycle *WorkspaceLifecycleService
 }
 
-func NewSyncHandler(d *db.DB, sc *search.Client, hub pubsub.Hub, bp billing.Provider) *SyncHandler {
-	return &SyncHandler{db: d, search: sc, hub: hub, billing: bp}
+func NewSyncHandler(
+	d *db.DB,
+	sc *search.Client,
+	hub pubsub.Hub,
+	bp billing.Provider,
+	lifecycle ...*WorkspaceLifecycleService,
+) *SyncHandler {
+	return &SyncHandler{
+		db:        d,
+		search:    sc,
+		hub:       hub,
+		billing:   bp,
+		lifecycle: firstWorkspaceLifecycleService(lifecycle),
+	}
 }
 
 // POST /sync/push

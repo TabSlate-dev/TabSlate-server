@@ -4,23 +4,34 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/TabSlate-dev/TabSlate-server/billing"
 	"github.com/TabSlate-dev/TabSlate-server/db"
 	"github.com/TabSlate-dev/TabSlate-server/internal/middleware"
 	"github.com/TabSlate-dev/TabSlate-server/internal/model"
 	"github.com/TabSlate-dev/TabSlate-server/internal/pubsub"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type WorkspaceHandler struct {
-	db      *db.DB
-	hub     pubsub.Hub
-	billing billing.Provider
+	db        *db.DB
+	hub       pubsub.Hub
+	billing   billing.Provider
+	lifecycle *WorkspaceLifecycleService
 }
 
-func NewWorkspaceHandler(d *db.DB, hub pubsub.Hub, bp billing.Provider) *WorkspaceHandler {
-	return &WorkspaceHandler{db: d, hub: hub, billing: bp}
+func NewWorkspaceHandler(
+	d *db.DB,
+	hub pubsub.Hub,
+	bp billing.Provider,
+	lifecycle ...*WorkspaceLifecycleService,
+) *WorkspaceHandler {
+	return &WorkspaceHandler{
+		db:        d,
+		hub:       hub,
+		billing:   bp,
+		lifecycle: firstWorkspaceLifecycleService(lifecycle),
+	}
 }
 
 // GET /workspaces
