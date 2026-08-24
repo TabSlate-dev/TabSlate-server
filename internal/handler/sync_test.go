@@ -294,6 +294,68 @@ func TestSyncPush_LegacyWorkspaceDuplicateDeleteWins(t *testing.T) {
 	})
 }
 
+func TestSyncPush_LegacyWorkspaceDuplicateDeleteWinsInReverseOrder(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+		email:    "sync-legacy-workspace-reverse-duplicate@example.com",
+		password: "password123",
+	})
+	insertLegacyWorkspaceLifecycleFixture(t, testDB, userID, "sync-legacy-reverse-duplicate", 0, 1, 40)
+	insertWorkspaceLifecycleRoot(t, testDB, userID, "sync-legacy-unrelated", 0)
+	deletedAt := int64(8000)
+
+	recorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+		Entities: model.SyncPushEntities{
+			Workspaces: []model.SyncWorkspaceMutation{
+				{
+					ID:       "sync-legacy-reverse-duplicate",
+					Name:     "Must not replace tombstone",
+					Position: 99,
+				},
+				{
+					ID:       "sync-legacy-unrelated",
+					Name:     "Updated unrelated workspace",
+					Position: 18,
+				},
+				{
+					ID:        "sync-legacy-reverse-duplicate",
+					Name:      "Delete payload",
+					Position:  98,
+					DeletedAt: &deletedAt,
+				},
+			},
+		},
+	})
+	assertSyncStatusOK(t, recorder)
+	response := decodeSyncPushResponse(t, recorder)
+	assertRejected(t, response, model.Rejected{
+		ID: "sync-legacy-reverse-duplicate", Reason: model.RejectionReasonWorkspaceDeleted, Type: "workspace",
+	})
+	if len(response.Rejected) != 1 {
+		t.Fatalf("reverse duplicate legacy mutations rejected = %#v, want only workspace_deleted", response.Rejected)
+	}
+	assertWorkspaceLifecycleRoot(t, testDB, "sync-legacy-reverse-duplicate", workspaceLifecycleRootExpectation{
+		name:          "Workspace sync-legacy-reverse-duplicate",
+		icon:          stringPtr("icon-sync-legacy-reverse-duplicate"),
+		color:         stringPtr("color-sync-legacy-reverse-duplicate"),
+		position:      17,
+		seq:           response.ServerSeq,
+		isDeleted:     1,
+		deletionModel: 0,
+		deletedAtSet:  true,
+	})
+	assertWorkspaceLifecycleRoot(t, testDB, "sync-legacy-unrelated", workspaceLifecycleRootExpectation{
+		name:          "Updated unrelated workspace",
+		icon:          nil,
+		color:         nil,
+		position:      18,
+		seq:           response.ServerSeq,
+		isDeleted:     0,
+		deletionModel: 1,
+		deletedAtSet:  false,
+	})
+}
+
 func TestSyncPushRejectsChildrenOfQuotaRejectedWorkspace(t *testing.T) {
 	testDB := openSyncTestDB(t)
 	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-quota@example.com", password: "password123"})

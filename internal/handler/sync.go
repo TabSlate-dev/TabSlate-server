@@ -170,11 +170,14 @@ func (h *SyncHandler) Push(c *gin.Context) {
 
 	legacyMetadataWorkspaceIDs := []string{}
 	legacyMetadataWorkspaceIDSet := entityIDSet{}
+	legacyDeleteMutationWorkspaceIDs := entityIDSet{}
 	if req.ProtocolVersion == 0 {
 		for _, workspace := range req.Entities.Workspaces {
 			if workspace.DeletedAt == nil {
 				legacyMetadataWorkspaceIDs = append(legacyMetadataWorkspaceIDs, workspace.ID)
 				legacyMetadataWorkspaceIDSet.Add(workspace.ID)
+			} else {
+				legacyDeleteMutationWorkspaceIDs.Add(workspace.ID)
 			}
 		}
 	}
@@ -297,7 +300,8 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	var wsUpserts []model.SyncWorkspaceMutation
 	legacyDeletedWorkspaceIDs := []string{}
 	for _, ws := range req.Entities.Workspaces {
-		if ws.DeletedAt == nil && deletedLegacyMetadataWorkspaces.Has(ws.ID) {
+		if ws.DeletedAt == nil &&
+			(deletedLegacyMetadataWorkspaces.Has(ws.ID) || legacyDeleteMutationWorkspaceIDs.Has(ws.ID)) {
 			rejected = append(rejected, model.Rejected{
 				ID: ws.ID, Reason: model.RejectionReasonWorkspaceDeleted, Type: "workspace",
 			})
