@@ -36,7 +36,8 @@ func (h *BookmarkHandler) List(c *gin.Context) {
 	            FROM bookmarks b
 	            JOIN collections c ON c.id = b.collection_id AND c.user_id = b.user_id
 	            JOIN workspaces w ON w.id = c.workspace_id AND w.user_id = c.user_id
-	            WHERE b.user_id=$1 AND b.deleted_at IS NULL AND c.is_deleted=0 AND w.is_deleted=0`
+	            WHERE b.user_id=$1 AND b.deleted_at IS NULL
+	              AND c.deleted_at IS NULL AND c.is_deleted=0 AND w.is_deleted=0`
 	args := []any{userID}
 	n := 2
 

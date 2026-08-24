@@ -214,6 +214,53 @@ func TestRetainedWorkspaceVisibility(t *testing.T) {
 	})
 }
 
+func TestRetainedWorkspaceVisibility_RESTDeletedCollection(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+		email:    "rest-deleted-collection-visibility@example.com",
+		password: "password123",
+	})
+	insertWorkspaceVisibilityFixture(t, testDB, userID)
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO collections
+			(id, user_id, workspace_id, name, icon, position, seq, archived_at, is_deleted, created_at, updated_at)
+		VALUES
+			('archived-collection', $1, 'active-workspace', 'Archived collection', 'archived-icon', 2, 1, 99, 0, 1, 1)`, userID); err != nil {
+		t.Fatalf("insert archived collection: %v", err)
+	}
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO bookmarks
+			(id, user_id, collection_id, title, url, favicon_url, description, is_trashed, position, seq, created_at, updated_at)
+		VALUES
+			('archived-collection-bookmark', $1, 'archived-collection', 'Archived collection bookmark',
+			 'https://archived-collection.example.com', 'archived-icon', 'Archived collection description', 0, 1, 1, 1, 1)`, userID); err != nil {
+		t.Fatalf("insert archived collection bookmark: %v", err)
+	}
+
+	hub := pubsub.NewInMemoryHub()
+	limits := fixedLimitsProvider{limits: syncTestLimits()}
+	collectionHandler := NewCollectionHandler(testDB, hub, limits)
+	bookmarkHandler := NewBookmarkHandler(testDB, nil, hub, limits)
+	deleteRecorder := performWorkspaceRoute(
+		t,
+		userID,
+		http.MethodDelete,
+		"/api/collections/:id",
+		"/api/collections/active-collection",
+		collectionHandler.Delete,
+	)
+	if deleteRecorder.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d body=%s, want 204", deleteRecorder.Code, deleteRecorder.Body.String())
+	}
+
+	listRecorder := performHandlerRequest(t, userID, http.MethodGet, "/bookmarks", nil, bookmarkHandler.List)
+	var bookmarks []model.Bookmark
+	decodeHandlerResponse(t, listRecorder, http.StatusOK, &bookmarks)
+	if len(bookmarks) != 1 || bookmarks[0].ID != "archived-collection-bookmark" {
+		t.Fatalf("bookmarks = %#v, want only archived-collection-bookmark", bookmarks)
+	}
+}
+
 func TestSearchFiltersRetainedWorkspace(t *testing.T) {
 	testDB := openSyncTestDB(t)
 	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
