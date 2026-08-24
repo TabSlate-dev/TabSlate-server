@@ -65,7 +65,7 @@ func pushSync(
 	testDB *db.DB,
 	userID string,
 	limits billing.Limits,
-	entities model.SyncEntities,
+	entities model.SyncPushEntities,
 ) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := json.Marshal(model.SyncPushRequest{Entities: entities})
@@ -92,6 +92,51 @@ func decodeSyncPushResponse(t *testing.T, recorder *httptest.ResponseRecorder) m
 	return response
 }
 
+func TestSyncPullCapabilities(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-pull-capabilities@example.com", password: "password123"})
+	deletedAt := int64(123)
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO workspaces (id, user_id, name, icon, color, position, seq, deleted_at, is_deleted, deletion_model, created_at, updated_at)
+		VALUES ('parent-tombstone', $1, 'Deleted', NULL, NULL, 0, 1, $2, 2, 1, 1, 1)`, userID, deletedAt); err != nil {
+		t.Fatalf("insert workspace parent tombstone: %v", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Request = httptest.NewRequest(http.MethodGet, "/sync/pull?after_seq=0", nil)
+	ginContext.Set(middleware.UserIDKey, userID)
+	NewSyncHandler(testDB, nil, pubsub.NewInMemoryHub(), fixedLimitsProvider{limits: syncTestLimits()}).Pull(ginContext)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response model.SyncPullResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode pull response: %v", err)
+	}
+	if !response.Capabilities.WorkspaceParentTombstone {
+		t.Fatal("workspace_parent_tombstone capability = false, want true")
+	}
+	if len(response.Entities.Workspaces) != 1 {
+		t.Fatalf("workspace count = %d, want 1", len(response.Entities.Workspaces))
+	}
+	workspace := response.Entities.Workspaces[0]
+	if workspace.IsDeleted != 2 {
+		t.Fatalf("workspace is_deleted = %d, want 2", workspace.IsDeleted)
+	}
+	if workspace.DeletionModel != 1 {
+		t.Fatalf("workspace deletion_model = %d, want 1", workspace.DeletionModel)
+	}
+	if workspace.DeletedAt == nil || *workspace.DeletedAt != deletedAt {
+		t.Fatalf("workspace deleted_at = %v, want %d", workspace.DeletedAt, deletedAt)
+	}
+	if workspace.Icon != nil || workspace.Color != nil {
+		t.Fatalf("workspace icon/color = %v/%v, want nil/nil", workspace.Icon, workspace.Color)
+	}
+}
+
 func TestSyncPushRejectsChildrenOfQuotaRejectedWorkspace(t *testing.T) {
 	testDB := openSyncTestDB(t)
 	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-quota@example.com", password: "password123"})
@@ -104,8 +149,8 @@ func TestSyncPushRejectsChildrenOfQuotaRejectedWorkspace(t *testing.T) {
 		limits := syncTestLimits()
 		limits.MaxWorkspaces = 1
 		return limits
-	}(), model.SyncEntities{
-		Workspaces: []model.Workspace{{ID: guestWorkspaceID, Name: "Guest", Position: 1}},
+	}(), model.SyncPushEntities{
+		Workspaces: []model.SyncWorkspaceMutation{{ID: guestWorkspaceID, Name: "Guest", Position: 1}},
 		Collections: []model.Collection{{
 			ID: "guest-default", WorkspaceID: &guestWorkspaceID, Name: "Default", Position: 0,
 		}},
@@ -158,7 +203,7 @@ func TestSyncPushRejectsBookmarkWithAnotherUsersCollection(t *testing.T) {
 	}
 
 	collectionID := "other-collection"
-	recorder := pushSync(t, testDB, userID, syncTestLimits(), model.SyncEntities{
+	recorder := pushSync(t, testDB, userID, syncTestLimits(), model.SyncPushEntities{
 		Bookmarks: []model.Bookmark{{ID: "invalid-bookmark", CollectionID: &collectionID, Title: "Invalid", URL: "https://example.com"}},
 	})
 	assertSyncStatusOK(t, recorder)
@@ -178,7 +223,7 @@ func TestSyncPushRejectsBookmarkWithQuotaRejectedCollection(t *testing.T) {
 	collectionID := "rejected-collection"
 	limits := syncTestLimits()
 	limits.MaxCollections = 1
-	recorder := pushSync(t, testDB, userID, limits, model.SyncEntities{
+	recorder := pushSync(t, testDB, userID, limits, model.SyncPushEntities{
 		Collections: []model.Collection{{ID: collectionID, Name: "Rejected", Position: 1}},
 		Bookmarks:   []model.Bookmark{{ID: "rejected-bookmark", CollectionID: &collectionID, Title: "Child", URL: "https://example.com"}},
 	})
@@ -193,8 +238,8 @@ func TestSyncPushAcceptsCollectionWithNewWorkspace(t *testing.T) {
 	testDB := openSyncTestDB(t)
 	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-new-parent@example.com", password: "password123"})
 	workspaceID := "new-workspace"
-	recorder := pushSync(t, testDB, userID, syncTestLimits(), model.SyncEntities{
-		Workspaces:  []model.Workspace{{ID: workspaceID, Name: "New", Position: 0}},
+	recorder := pushSync(t, testDB, userID, syncTestLimits(), model.SyncPushEntities{
+		Workspaces:  []model.SyncWorkspaceMutation{{ID: workspaceID, Name: "New", Position: 0}},
 		Collections: []model.Collection{{ID: "new-collection", WorkspaceID: &workspaceID, Name: "Child", Position: 0}},
 	})
 	assertSyncStatusOK(t, recorder)
@@ -212,8 +257,8 @@ func TestSyncPushAcceptsChildOfStaleOwnedWorkspace(t *testing.T) {
 		t.Fatalf("insert stale workspace: %v", err)
 	}
 	workspaceID := "stale-workspace"
-	recorder := pushSync(t, testDB, userID, syncTestLimits(), model.SyncEntities{
-		Workspaces:  []model.Workspace{{ID: workspaceID, Name: "Stale", Position: 0}},
+	recorder := pushSync(t, testDB, userID, syncTestLimits(), model.SyncPushEntities{
+		Workspaces:  []model.SyncWorkspaceMutation{{ID: workspaceID, Name: "Stale", Position: 0}},
 		Collections: []model.Collection{{ID: "child-collection", WorkspaceID: &workspaceID, Name: "Child", Position: 0}},
 	})
 	assertSyncStatusOK(t, recorder)
@@ -228,7 +273,7 @@ func TestSyncPushAcceptsChildOfStaleOwnedWorkspace(t *testing.T) {
 func TestSyncPushAcceptsBookmarkWithoutCollection(t *testing.T) {
 	testDB := openSyncTestDB(t)
 	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-uncategorized@example.com", password: "password123"})
-	recorder := pushSync(t, testDB, userID, syncTestLimits(), model.SyncEntities{
+	recorder := pushSync(t, testDB, userID, syncTestLimits(), model.SyncPushEntities{
 		Bookmarks: []model.Bookmark{{ID: "uncategorized", Title: "Uncategorized", URL: "https://example.com"}},
 	})
 	assertSyncStatusOK(t, recorder)
@@ -242,7 +287,7 @@ func TestSyncPushAcceptsBookmarkWithoutCollection(t *testing.T) {
 func TestSyncPushRejectsSavedGroupWithoutWorkspace(t *testing.T) {
 	testDB := openSyncTestDB(t)
 	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-group-parent@example.com", password: "password123"})
-	recorder := pushSync(t, testDB, userID, syncTestLimits(), model.SyncEntities{
+	recorder := pushSync(t, testDB, userID, syncTestLimits(), model.SyncPushEntities{
 		Groups: []model.Group{{ID: "no-workspace", Name: "Group", Color: "grey"}},
 	})
 	assertSyncStatusOK(t, recorder)
@@ -295,7 +340,7 @@ func TestCollectionQuotaCountsAllNonPermanentCollections(t *testing.T) {
 		t.Fatalf("collection usage = %d, want 2", plan.Usage.Collections)
 	}
 
-	recorder := pushSync(t, testDB, userID, limits, model.SyncEntities{
+	recorder := pushSync(t, testDB, userID, limits, model.SyncPushEntities{
 		Collections: []model.Collection{{ID: "archived-collection", Name: "Restored", Position: 0}},
 	})
 	assertSyncStatusOK(t, recorder)
@@ -318,7 +363,7 @@ func TestSyncPushCollectionQuotaCountsAllNonPermanentCollections(t *testing.T) {
 
 	limits := syncTestLimits()
 	limits.MaxCollections = 2
-	firstRecorder := pushSync(t, testDB, userID, limits, model.SyncEntities{
+	firstRecorder := pushSync(t, testDB, userID, limits, model.SyncPushEntities{
 		Collections: []model.Collection{{ID: "sync-first-active", Name: "First", Position: 2}},
 	})
 	assertSyncStatusOK(t, firstRecorder)
@@ -327,7 +372,7 @@ func TestSyncPushCollectionQuotaCountsAllNonPermanentCollections(t *testing.T) {
 	})
 	assertEntityCount(t, testDB, `SELECT COUNT(*) FROM collections WHERE id = 'sync-first-active'`, 0)
 
-	secondRecorder := pushSync(t, testDB, userID, limits, model.SyncEntities{
+	secondRecorder := pushSync(t, testDB, userID, limits, model.SyncPushEntities{
 		Collections: []model.Collection{{ID: "sync-archived-collection", Name: "Restored", Position: 0}},
 	})
 	assertSyncStatusOK(t, secondRecorder)

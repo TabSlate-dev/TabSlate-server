@@ -205,17 +205,72 @@ type TagRequest struct {
 
 // ─── Sync DTOs ────────────────────────────────────────────────────────────────
 
-// SyncEntities is the common shape for push requests and pull responses.
+type WorkspaceLifecycleAction string
+
+const (
+	WorkspaceLifecycleDelete  WorkspaceLifecycleAction = "delete"
+	WorkspaceLifecycleRestore WorkspaceLifecycleAction = "restore"
+	WorkspaceLifecyclePurge   WorkspaceLifecycleAction = "purge"
+)
+
+const (
+	RejectionReasonLastActiveWorkspace = "last_active_workspace"
+	RejectionReasonWorkspaceDeleted    = "workspace_deleted"
+	RejectionReasonParentDeleted       = "parent_deleted"
+	RejectionReasonPermanentlyDeleted  = "permanently_deleted"
+)
+
+// SyncWorkspace is the server-authoritative representation returned by pull.
+type SyncWorkspace struct {
+	ID            string  `json:"id"`
+	UserID        string  `json:"user_id"`
+	Name          string  `json:"name"`
+	Icon          *string `json:"icon"`
+	Color         *string `json:"color"`
+	Position      int     `json:"position"`
+	Seq           int64   `json:"seq"`
+	DeletedAt     *int64  `json:"deleted_at"`
+	IsDeleted     int     `json:"is_deleted"`
+	DeletionModel int     `json:"deletion_model"`
+	CreatedAt     int64   `json:"created_at"`
+	UpdatedAt     int64   `json:"updated_at"`
+}
+
+// SyncWorkspaceMutation is the client representation accepted by push.
+type SyncWorkspaceMutation struct {
+	ID              string                   `json:"id"`
+	Name            string                   `json:"name"`
+	Icon            *string                  `json:"icon,omitempty"`
+	Color           *string                  `json:"color,omitempty"`
+	Position        int                      `json:"position"`
+	Seq             int64                    `json:"seq"`
+	DeletedAt       *int64                   `json:"deleted_at,omitempty"`
+	CreatedAt       int64                    `json:"created_at"`
+	UpdatedAt       int64                    `json:"updated_at"`
+	LifecycleAction WorkspaceLifecycleAction `json:"lifecycle_action,omitempty"`
+}
+
+// SyncEntities is the response shape returned by pull.
 type SyncEntities struct {
-	Workspaces  []Workspace  `json:"workspaces"`
-	Collections []Collection `json:"collections"`
-	Bookmarks   []Bookmark   `json:"bookmarks"`
-	Tags        []Tag        `json:"tags"`
-	Groups      []Group      `json:"groups"`
+	Workspaces  []SyncWorkspace `json:"workspaces"`
+	Collections []Collection    `json:"collections"`
+	Bookmarks   []Bookmark      `json:"bookmarks"`
+	Tags        []Tag           `json:"tags"`
+	Groups      []Group         `json:"groups"`
+}
+
+// SyncPushEntities is the request shape accepted by push.
+type SyncPushEntities struct {
+	Workspaces  []SyncWorkspaceMutation `json:"workspaces"`
+	Collections []Collection            `json:"collections"`
+	Bookmarks   []Bookmark              `json:"bookmarks"`
+	Tags        []Tag                   `json:"tags"`
+	Groups      []Group                 `json:"groups"`
 }
 
 type SyncPushRequest struct {
-	Entities SyncEntities `json:"entities"`
+	ProtocolVersion int              `json:"protocol_version,omitempty"`
+	Entities        SyncPushEntities `json:"entities"`
 }
 
 type SyncPushResponse struct {
@@ -232,8 +287,13 @@ type Rejected struct {
 }
 
 type SyncPullResponse struct {
-	Entities  SyncEntities `json:"entities"`
-	ServerSeq int64        `json:"server_seq"`
+	Entities     SyncEntities     `json:"entities"`
+	ServerSeq    int64            `json:"server_seq"`
+	Capabilities SyncCapabilities `json:"capabilities"`
+}
+
+type SyncCapabilities struct {
+	WorkspaceParentTombstone bool `json:"workspace_parent_tombstone"`
 }
 
 // SSEToken is a short-lived token for authenticating the SSE stream.

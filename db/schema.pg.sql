@@ -146,6 +146,52 @@ CREATE TABLE IF NOT EXISTS subscription_capacity (
 ALTER TABLE subscription_capacity ADD COLUMN IF NOT EXISTS max_saved_groups INTEGER NOT NULL DEFAULT -1;
 ALTER TABLE subscription_capacity ADD COLUMN IF NOT EXISTS trash_grace_days INTEGER NOT NULL DEFAULT 7;
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at BIGINT NOT NULL
+);
+
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS is_deleted INT NOT NULL DEFAULT 0;
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS deletion_model SMALLINT NOT NULL DEFAULT 1;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'workspaces_is_deleted_check'
+          AND conrelid = 'workspaces'::regclass
+    ) THEN
+        ALTER TABLE workspaces ADD CONSTRAINT workspaces_is_deleted_check
+        CHECK (is_deleted IN (0, 1, 2));
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'workspaces_deletion_model_check'
+          AND conrelid = 'workspaces'::regclass
+    ) THEN
+        ALTER TABLE workspaces ADD CONSTRAINT workspaces_deletion_model_check
+        CHECK (deletion_model IN (0, 1));
+    END IF;
+END $$;
+
+WITH first_run AS (
+    INSERT INTO schema_migrations (name, applied_at)
+    VALUES ('workspace_parent_tombstone_v1', EXTRACT(EPOCH FROM NOW())::BIGINT)
+    ON CONFLICT DO NOTHING
+    RETURNING name
+)
+UPDATE workspaces
+SET is_deleted = 1,
+    deletion_model = 0
+WHERE deleted_at IS NOT NULL
+  AND EXISTS (SELECT 1 FROM first_run);
+
+CREATE INDEX IF NOT EXISTS idx_workspaces_user_deleted
+ON workspaces (user_id, is_deleted);
+
+CREATE INDEX IF NOT EXISTS idx_workspaces_retention
+ON workspaces (user_id, is_deleted, deleted_at);
+
 -- Historical trashed collections with deleted_at set and archived_at NULL were
 -- stored as is_deleted = 0 due to a frontend bug. Promote them to trashed so
 -- the cleanup goroutine can auto-expire them. This backfill is idempotent.

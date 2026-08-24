@@ -232,7 +232,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	}
 
 	// ── Workspaces ────────────────────────────────────────────────────────────
-	var wsUpserts []model.Workspace
+	var wsUpserts []model.SyncWorkspaceMutation
 	for _, ws := range req.Entities.Workspaces {
 		if ws.DeletedAt == nil && limits.MaxWorkspaces != -1 {
 			if _, exists := activeWSIDs[ws.ID]; !exists {
@@ -580,11 +580,13 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 		}
 	}
 
-	var resp model.SyncPullResponse
+	resp := model.SyncPullResponse{
+		Capabilities: model.SyncCapabilities{WorkspaceParentTombstone: true},
+	}
 
 	// Workspaces
 	wsRows, err := h.db.Query(ctx,
-		`SELECT id, user_id, name, icon, color, position, seq, deleted_at, created_at, updated_at
+		`SELECT id, user_id, name, icon, color, position, seq, deleted_at, is_deleted, deletion_model, created_at, updated_at
          FROM workspaces WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
 		userID, afterSeq)
 	if err != nil {
@@ -593,9 +595,9 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 	}
 	defer wsRows.Close()
 	for wsRows.Next() {
-		var ws model.Workspace
+		var ws model.SyncWorkspace
 		if err := wsRows.Scan(&ws.ID, &ws.UserID, &ws.Name, &ws.Icon, &ws.Color, &ws.Position,
-			&ws.Seq, &ws.DeletedAt, &ws.CreatedAt, &ws.UpdatedAt); err != nil {
+			&ws.Seq, &ws.DeletedAt, &ws.IsDeleted, &ws.DeletionModel, &ws.CreatedAt, &ws.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace scan failed"})
 			return
 		}
@@ -764,7 +766,7 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 
 	// Ensure slices are not nil in JSON output ([] not null)
 	if resp.Entities.Workspaces == nil {
-		resp.Entities.Workspaces = []model.Workspace{}
+		resp.Entities.Workspaces = []model.SyncWorkspace{}
 	}
 	if resp.Entities.Collections == nil {
 		resp.Entities.Collections = []model.Collection{}
