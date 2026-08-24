@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -106,6 +107,24 @@ func decodeSyncPushResponse(t *testing.T, recorder *httptest.ResponseRecorder) m
 	return response
 }
 
+func pullSync(t *testing.T, testDB *db.DB, userID string, afterSeq int64) model.SyncPullResponse {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Request = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/sync/pull?after_seq=%d", afterSeq), nil)
+	ginContext.Set(middleware.UserIDKey, userID)
+	NewSyncHandler(testDB, nil, pubsub.NewInMemoryHub(), fixedLimitsProvider{limits: syncTestLimits()}).Pull(ginContext)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response model.SyncPullResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode pull response: %v", err)
+	}
+	return response
+}
+
 func TestSyncPullCapabilities(t *testing.T) {
 	testDB := openSyncTestDB(t)
 	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-pull-capabilities@example.com", password: "password123"})
@@ -151,6 +170,248 @@ func TestSyncPullCapabilities(t *testing.T) {
 	}
 	if workspace.Icon != nil || workspace.Color != nil {
 		t.Fatalf("workspace icon/color = %v/%v, want nil/nil", workspace.Icon, workspace.Color)
+	}
+}
+
+func TestSyncPushV2WorkspaceMetadataCannotTransitionLifecycle(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-v2-metadata@example.com", password: "password123"})
+	insertWorkspaceLifecycleRoot(t, testDB, userID, "v2-active", 0)
+	insertWorkspaceLifecycleRoot(t, testDB, userID, "v2-deleted", 1)
+	deletedAt := int64(9000)
+	beforeDeleted := workspaceLifecycleRootSnapshot(t, testDB, "v2-deleted")
+
+	recorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+		ProtocolVersion: 2,
+		Entities: model.SyncPushEntities{Workspaces: []model.SyncWorkspaceMutation{
+			{ID: "v2-active", Name: "Metadata only", Position: 91, DeletedAt: &deletedAt},
+			{ID: "v2-deleted", Name: "Must not restore", Position: 92},
+		}},
+	})
+	assertSyncStatusOK(t, recorder)
+	response := decodeSyncPushResponse(t, recorder)
+	assertRejected(t, response, model.Rejected{
+		ID: "v2-deleted", Reason: model.RejectionReasonWorkspaceDeleted, Type: "workspace",
+	})
+	if len(response.Rejected) != 1 {
+		t.Fatalf("rejected = %#v, want only workspace_deleted", response.Rejected)
+	}
+
+	var (
+		name      string
+		position  int
+		isDeleted int
+		gotDelete *int64
+	)
+	if err := testDB.QueryRow(t.Context(), `SELECT name, position, is_deleted, deleted_at FROM workspaces WHERE id = 'v2-active'`).Scan(
+		&name, &position, &isDeleted, &gotDelete,
+	); err != nil {
+		t.Fatalf("query active workspace: %v", err)
+	}
+	if name != "Metadata only" || position != 91 || isDeleted != 0 || gotDelete != nil {
+		t.Fatalf("active metadata result = {name:%q position:%d state:%d deletedAt:%v}", name, position, isDeleted, gotDelete)
+	}
+	if afterDeleted := workspaceLifecycleRootSnapshot(t, testDB, "v2-deleted"); afterDeleted != beforeDeleted {
+		t.Fatalf("ordinary metadata changed deleted workspace\nbefore=%s\nafter=%s", beforeDeleted, afterDeleted)
+	}
+}
+
+func TestSyncPushV2WorkspaceLifecycleActionsUseLifecycleTransaction(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-v2-actions@example.com", password: "password123"})
+	insertWorkspaceLifecycleFixture(t, testDB, userID, "v2-action", 0)
+	insertWorkspaceLifecycleRoot(t, testDB, userID, "v2-action-sibling", 0)
+	beforeDescendants := workspaceLifecycleDescendantSnapshot(t, testDB, "v2-action")
+
+	deleteRecorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+		ProtocolVersion: 2,
+		Entities: model.SyncPushEntities{
+			Workspaces: []model.SyncWorkspaceMutation{{
+				ID: "v2-action", Name: "Ignored lifecycle metadata", Position: 99,
+				LifecycleAction: model.WorkspaceLifecycleDelete,
+			}},
+			Collections: []model.Collection{{
+				ID: "v2-action-collection", WorkspaceID: stringPtr("v2-action"), Name: "Must follow lifecycle action",
+			}},
+		},
+	})
+	assertSyncStatusOK(t, deleteRecorder)
+	deleteResponse := decodeSyncPushResponse(t, deleteRecorder)
+	assertRejected(t, deleteResponse, model.Rejected{
+		ID: "v2-action-collection", Reason: model.RejectionReasonParentDeleted, Type: "collection",
+		ParentID: "v2-action", ParentType: "workspace",
+	})
+	if len(deleteResponse.Rejected) != 1 {
+		t.Fatalf("delete rejected = %#v, want only descendant parent_deleted", deleteResponse.Rejected)
+	}
+	assertWorkspaceLifecycleRoot(t, testDB, "v2-action", workspaceLifecycleRootExpectation{
+		name: "Workspace v2-action", icon: stringPtr("icon-v2-action"), color: stringPtr("color-v2-action"),
+		position: 17, seq: deleteResponse.ServerSeq, isDeleted: 1, deletionModel: 1, deletedAtSet: true,
+	})
+	if afterDescendants := workspaceLifecycleDescendantSnapshot(t, testDB, "v2-action"); !reflect.DeepEqual(afterDescendants, beforeDescendants) {
+		t.Fatalf("parent-only delete changed descendants\nbefore=%#v\nafter=%#v", beforeDescendants, afterDescendants)
+	}
+
+	restoreRecorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+		ProtocolVersion: 2,
+		Entities: model.SyncPushEntities{Workspaces: []model.SyncWorkspaceMutation{{
+			ID: "v2-action", LifecycleAction: model.WorkspaceLifecycleRestore,
+		}}},
+	})
+	assertSyncStatusOK(t, restoreRecorder)
+	restoreResponse := decodeSyncPushResponse(t, restoreRecorder)
+	if len(restoreResponse.Rejected) != 0 {
+		t.Fatalf("restore rejected = %#v, want none", restoreResponse.Rejected)
+	}
+	assertWorkspaceLifecycleRoot(t, testDB, "v2-action", workspaceLifecycleRootExpectation{
+		name: "Workspace v2-action", icon: stringPtr("icon-v2-action"), color: stringPtr("color-v2-action"),
+		position: 17, seq: restoreResponse.ServerSeq, isDeleted: 0, deletionModel: 1, deletedAtSet: false,
+	})
+}
+
+func TestSyncPushV2WorkspaceParentStatesRejectDescendants(t *testing.T) {
+	tests := []struct {
+		name       string
+		state      int
+		wantReason string
+	}{
+		{name: "soft deleted", state: 1, wantReason: model.RejectionReasonParentDeleted},
+		{name: "permanently deleted", state: 2, wantReason: model.RejectionReasonPermanentlyDeleted},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			testDB := openSyncTestDB(t)
+			userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+				email: "sync-parent-state-" + fmt.Sprint(test.state) + "@example.com", password: "password123",
+			})
+			workspaceID := "parent-state-" + fmt.Sprint(test.state)
+			collectionID := workspaceID + "-collection"
+			insertWorkspaceLifecycleRoot(t, testDB, userID, workspaceID, test.state)
+			if _, err := testDB.Exec(t.Context(), `
+				INSERT INTO collections (id, user_id, workspace_id, name, position, seq, is_deleted, created_at, updated_at)
+				VALUES ($1, $2, $3, 'Retained collection', 0, 1, 0, 1, 1)`,
+				collectionID, userID, workspaceID,
+			); err != nil {
+				t.Fatalf("insert retained collection: %v", err)
+			}
+			if _, err := testDB.Exec(t.Context(), `
+				INSERT INTO bookmarks (id, user_id, collection_id, title, url, position, seq, is_trashed, created_at, updated_at)
+				VALUES ($1, $2, $3, 'Retained bookmark', 'https://retained.example.com', 0, 1, 0, 1, 1)`,
+				workspaceID+"-bookmark", userID, collectionID,
+			); err != nil {
+				t.Fatalf("insert retained bookmark: %v", err)
+			}
+			if _, err := testDB.Exec(t.Context(), `
+				INSERT INTO groups (id, user_id, workspace_id, name, color, seq, is_deleted, created_at, updated_at)
+				VALUES ($1, $2, $3, 'Retained group', 'blue', 1, 0, 1, 1)`,
+				workspaceID+"-group", userID, workspaceID,
+			); err != nil {
+				t.Fatalf("insert retained group: %v", err)
+			}
+
+			recorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+				ProtocolVersion: 2,
+				Entities: model.SyncPushEntities{
+					Workspaces:  []model.SyncWorkspaceMutation{{ID: workspaceID, Name: "Rejected metadata"}},
+					Collections: []model.Collection{{ID: collectionID, WorkspaceID: &workspaceID, Name: "Rejected collection"}},
+					Bookmarks:   []model.Bookmark{{ID: workspaceID + "-bookmark", CollectionID: &collectionID, Title: "Rejected bookmark", URL: "https://retained.example.com"}},
+					Groups:      []model.Group{{ID: workspaceID + "-group", WorkspaceID: &workspaceID, Name: "Rejected group", Color: "blue"}},
+				},
+			})
+			assertSyncStatusOK(t, recorder)
+			response := decodeSyncPushResponse(t, recorder)
+			rootReason := test.wantReason
+			if test.state == 1 {
+				rootReason = model.RejectionReasonWorkspaceDeleted
+			}
+			assertRejected(t, response, model.Rejected{ID: workspaceID, Reason: rootReason, Type: "workspace"})
+			assertRejected(t, response, model.Rejected{ID: collectionID, Reason: test.wantReason, Type: "collection", ParentID: workspaceID, ParentType: "workspace"})
+			assertRejected(t, response, model.Rejected{ID: workspaceID + "-bookmark", Reason: test.wantReason, Type: "bookmark", ParentID: collectionID, ParentType: "collection"})
+			assertRejected(t, response, model.Rejected{ID: workspaceID + "-group", Reason: test.wantReason, Type: "saved_group", ParentID: workspaceID, ParentType: "workspace"})
+			if len(response.Rejected) != 4 {
+				t.Fatalf("rejected = %#v, want four lifecycle rejections", response.Rejected)
+			}
+		})
+	}
+}
+
+func TestSyncPushV2WorkspacePurgeIsIdempotent(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-v2-purge@example.com", password: "password123"})
+	insertWorkspaceLifecycleFixture(t, testDB, userID, "v2-purge", 1)
+
+	request := model.SyncPushRequest{
+		ProtocolVersion: 2,
+		Entities: model.SyncPushEntities{Workspaces: []model.SyncWorkspaceMutation{{
+			ID: "v2-purge", LifecycleAction: model.WorkspaceLifecyclePurge,
+		}}},
+	}
+	firstRecorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), request)
+	assertSyncStatusOK(t, firstRecorder)
+	if rejected := decodeSyncPushResponse(t, firstRecorder).Rejected; len(rejected) != 0 {
+		t.Fatalf("first purge rejected = %#v, want none", rejected)
+	}
+	assertWorkspaceLifecycleDescendantCounts(t, testDB, "v2-purge", workspaceLifecycleDescendantCounts{})
+
+	secondRecorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), request)
+	assertSyncStatusOK(t, secondRecorder)
+	if rejected := decodeSyncPushResponse(t, secondRecorder).Rejected; len(rejected) != 0 {
+		t.Fatalf("repeated purge rejected = %#v, want idempotent success", rejected)
+	}
+	assertWorkspaceLifecycleDescendantCounts(t, testDB, "v2-purge", workspaceLifecycleDescendantCounts{})
+}
+
+func TestSyncPullWorkspaceLifecycleStatesRetainDescendantsAndCapability(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-pull-lifecycle@example.com", password: "password123"})
+	insertWorkspaceLifecycleRoot(t, testDB, userID, "pull-active", 0)
+	insertWorkspaceLifecycleRoot(t, testDB, userID, "pull-deleted", 1)
+	insertWorkspaceLifecycleRoot(t, testDB, userID, "pull-terminal", 2)
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO collections (id, user_id, workspace_id, name, icon, position, seq, is_deleted, created_at, updated_at)
+		VALUES ('pull-retained-collection', $1, 'pull-deleted', 'Retained collection', '', 0, 41, 0, 1, 1)`, userID); err != nil {
+		t.Fatalf("insert retained pull collection: %v", err)
+	}
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO bookmarks (id, user_id, collection_id, title, url, favicon_url, description, position, seq, is_trashed, created_at, updated_at)
+		VALUES ('pull-retained-bookmark', $1, 'pull-retained-collection', 'Retained bookmark', 'https://retained.example.com', '', '', 0, 42, 0, 1, 1)`, userID); err != nil {
+		t.Fatalf("insert retained pull bookmark: %v", err)
+	}
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO groups (id, user_id, workspace_id, name, color, seq, is_deleted, created_at, updated_at)
+		VALUES ('pull-retained-group', $1, 'pull-deleted', 'Retained group', 'blue', 43, 0, 1, 1)`, userID); err != nil {
+		t.Fatalf("insert retained pull group: %v", err)
+	}
+	if _, err := testDB.Exec(t.Context(), `INSERT INTO user_sync_seq (user_id, seq) VALUES ($1, 43)`, userID); err != nil {
+		t.Fatalf("insert pull sequence: %v", err)
+	}
+
+	response := pullSync(t, testDB, userID, 0)
+	if !response.Capabilities.WorkspaceParentTombstone {
+		t.Fatal("workspace_parent_tombstone capability = false, want true")
+	}
+	states := map[string]int{}
+	for _, workspace := range response.Entities.Workspaces {
+		states[workspace.ID] = workspace.IsDeleted
+	}
+	if !reflect.DeepEqual(states, map[string]int{"pull-active": 0, "pull-deleted": 1, "pull-terminal": 2}) {
+		t.Fatalf("workspace states = %#v", states)
+	}
+	if len(response.Entities.Collections) != 1 || response.Entities.Collections[0].ID != "pull-retained-collection" ||
+		len(response.Entities.Bookmarks) != 1 || response.Entities.Bookmarks[0].ID != "pull-retained-bookmark" ||
+		len(response.Entities.Groups) != 1 || response.Entities.Groups[0].ID != "pull-retained-group" {
+		t.Fatalf("retained descendants missing: collections=%#v bookmarks=%#v groups=%#v",
+			response.Entities.Collections, response.Entities.Bookmarks, response.Entities.Groups)
+	}
+
+	emptyResponse := pullSync(t, testDB, userID, response.ServerSeq)
+	if !emptyResponse.Capabilities.WorkspaceParentTombstone {
+		t.Fatal("empty delta workspace_parent_tombstone capability = false, want true")
+	}
+	if len(emptyResponse.Entities.Workspaces) != 0 || len(emptyResponse.Entities.Collections) != 0 ||
+		len(emptyResponse.Entities.Bookmarks) != 0 || len(emptyResponse.Entities.Groups) != 0 {
+		t.Fatalf("empty delta entities = %#v, want empty", emptyResponse.Entities)
 	}
 }
 
@@ -646,6 +907,148 @@ func TestSyncPushCollectionQuotaCountsAllNonPermanentCollections(t *testing.T) {
 		t.Fatalf("restore rejected = %#v, want none", rejected)
 	}
 	assertEntityCount(t, testDB, `SELECT COUNT(*) FROM collections WHERE id = 'sync-archived-collection' AND archived_at IS NULL`, 1)
+}
+
+func TestSyncPushRetainedResourcesQuotaOnlyReleasesTerminalRecords(t *testing.T) {
+	t.Run("workspaces", func(t *testing.T) {
+		testDB := openSyncTestDB(t)
+		userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-workspace-retained-quota@example.com", password: "password123"})
+		insertWorkspaceLifecycleRoot(t, testDB, userID, "quota-workspace-retained", 1)
+		insertWorkspaceLifecycleRoot(t, testDB, userID, "quota-workspace-terminal", 2)
+		limits := syncTestLimits()
+		limits.MaxWorkspaces = 1
+
+		firstRecorder := pushSyncRequest(t, testDB, userID, limits, model.SyncPushRequest{
+			ProtocolVersion: 2,
+			Entities: model.SyncPushEntities{Workspaces: []model.SyncWorkspaceMutation{{
+				ID: "quota-workspace-first", Name: "First", Position: 1,
+			}}},
+		})
+		assertSyncStatusOK(t, firstRecorder)
+		assertRejected(t, decodeSyncPushResponse(t, firstRecorder), model.Rejected{
+			ID: "quota-workspace-first", Reason: "quota_exceeded", Type: "workspace",
+		})
+		assertEntityCount(t, testDB, `SELECT COUNT(*) FROM workspaces WHERE id = 'quota-workspace-first'`, 0)
+
+		if _, err := testDB.Exec(t.Context(), `UPDATE workspaces SET is_deleted = 2 WHERE id = 'quota-workspace-retained'`); err != nil {
+			t.Fatalf("terminalize retained workspace: %v", err)
+		}
+		secondRecorder := pushSyncRequest(t, testDB, userID, limits, model.SyncPushRequest{
+			ProtocolVersion: 2,
+			Entities: model.SyncPushEntities{Workspaces: []model.SyncWorkspaceMutation{{
+				ID: "quota-workspace-second", Name: "Second", Position: 2,
+			}}},
+		})
+		assertSyncStatusOK(t, secondRecorder)
+		if rejected := decodeSyncPushResponse(t, secondRecorder).Rejected; len(rejected) != 0 {
+			t.Fatalf("workspace after terminal release rejected = %#v", rejected)
+		}
+		assertEntityCount(t, testDB, `SELECT COUNT(*) FROM workspaces WHERE id = 'quota-workspace-second'`, 1)
+	})
+
+	t.Run("collections", func(t *testing.T) {
+		testDB := openSyncTestDB(t)
+		userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-collection-retained-quota@example.com", password: "password123"})
+		if _, err := testDB.Exec(t.Context(), `
+			INSERT INTO collections (id, user_id, name, position, deleted_at, is_deleted, created_at, updated_at)
+			VALUES ('quota-collection-retained', $1, 'Retained', 0, 1, 1, 1, 1),
+			       ('quota-collection-terminal', $1, 'Terminal', 1, 1, 2, 1, 1)`, userID); err != nil {
+			t.Fatalf("insert collection quota fixtures: %v", err)
+		}
+		limits := syncTestLimits()
+		limits.MaxCollections = 1
+
+		firstRecorder := pushSync(t, testDB, userID, limits, model.SyncPushEntities{
+			Collections: []model.Collection{{ID: "quota-collection-first", Name: "First"}},
+		})
+		assertSyncStatusOK(t, firstRecorder)
+		assertRejected(t, decodeSyncPushResponse(t, firstRecorder), model.Rejected{
+			ID: "quota-collection-first", Reason: "quota_exceeded", Type: "collection",
+		})
+		assertEntityCount(t, testDB, `SELECT COUNT(*) FROM collections WHERE id = 'quota-collection-first'`, 0)
+
+		if _, err := testDB.Exec(t.Context(), `UPDATE collections SET is_deleted = 2 WHERE id = 'quota-collection-retained'`); err != nil {
+			t.Fatalf("terminalize retained collection: %v", err)
+		}
+		secondRecorder := pushSync(t, testDB, userID, limits, model.SyncPushEntities{
+			Collections: []model.Collection{{ID: "quota-collection-second", Name: "Second"}},
+		})
+		assertSyncStatusOK(t, secondRecorder)
+		if rejected := decodeSyncPushResponse(t, secondRecorder).Rejected; len(rejected) != 0 {
+			t.Fatalf("collection after terminal release rejected = %#v", rejected)
+		}
+		assertEntityCount(t, testDB, `SELECT COUNT(*) FROM collections WHERE id = 'quota-collection-second'`, 1)
+	})
+
+	t.Run("bookmarks", func(t *testing.T) {
+		testDB := openSyncTestDB(t)
+		userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-bookmark-retained-quota@example.com", password: "password123"})
+		if _, err := testDB.Exec(t.Context(), `
+			INSERT INTO bookmarks (id, user_id, title, url, position, seq, deleted_at, is_trashed, created_at, updated_at)
+			VALUES ('quota-bookmark-retained', $1, 'Retained', 'https://retained.example.com', 0, 1, 1, 1, 1, 1),
+			       ('quota-bookmark-terminal', $1, 'Terminal', 'https://terminal.example.com', 1, 1, 1, 2, 1, 1)`, userID); err != nil {
+			t.Fatalf("insert bookmark quota fixtures: %v", err)
+		}
+		limits := syncTestLimits()
+		limits.MaxBookmarks = 1
+
+		firstRecorder := pushSync(t, testDB, userID, limits, model.SyncPushEntities{
+			Bookmarks: []model.Bookmark{{ID: "quota-bookmark-first", Title: "First", URL: "https://first.example.com"}},
+		})
+		assertSyncStatusOK(t, firstRecorder)
+		assertRejected(t, decodeSyncPushResponse(t, firstRecorder), model.Rejected{
+			ID: "quota-bookmark-first", Reason: "quota_exceeded", Type: "bookmark",
+		})
+		assertEntityCount(t, testDB, `SELECT COUNT(*) FROM bookmarks WHERE id = 'quota-bookmark-first'`, 0)
+
+		if _, err := testDB.Exec(t.Context(), `UPDATE bookmarks SET is_trashed = 2 WHERE id = 'quota-bookmark-retained'`); err != nil {
+			t.Fatalf("terminalize retained bookmark: %v", err)
+		}
+		secondRecorder := pushSync(t, testDB, userID, limits, model.SyncPushEntities{
+			Bookmarks: []model.Bookmark{{ID: "quota-bookmark-second", Title: "Second", URL: "https://second.example.com"}},
+		})
+		assertSyncStatusOK(t, secondRecorder)
+		if rejected := decodeSyncPushResponse(t, secondRecorder).Rejected; len(rejected) != 0 {
+			t.Fatalf("bookmark after terminal release rejected = %#v", rejected)
+		}
+		assertEntityCount(t, testDB, `SELECT COUNT(*) FROM bookmarks WHERE id = 'quota-bookmark-second'`, 1)
+	})
+
+	t.Run("saved groups", func(t *testing.T) {
+		testDB := openSyncTestDB(t)
+		userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-group-retained-quota@example.com", password: "password123"})
+		insertWorkspaceLifecycleRoot(t, testDB, userID, "quota-group-workspace", 0)
+		workspaceID := "quota-group-workspace"
+		if _, err := testDB.Exec(t.Context(), `
+			INSERT INTO groups (id, user_id, workspace_id, name, color, seq, deleted_at, is_deleted, created_at, updated_at)
+			VALUES ('quota-group-retained', $1, $2, 'Retained', 'blue', 1, 1, 1, 1, 1),
+			       ('quota-group-terminal', $1, $2, 'Terminal', 'red', 1, 1, 2, 1, 1)`, userID, workspaceID); err != nil {
+			t.Fatalf("insert group quota fixtures: %v", err)
+		}
+		limits := syncTestLimits()
+		limits.MaxSavedGroups = 1
+
+		firstRecorder := pushSync(t, testDB, userID, limits, model.SyncPushEntities{
+			Groups: []model.Group{{ID: "quota-group-first", WorkspaceID: &workspaceID, Name: "First", Color: "blue"}},
+		})
+		assertSyncStatusOK(t, firstRecorder)
+		assertRejected(t, decodeSyncPushResponse(t, firstRecorder), model.Rejected{
+			ID: "quota-group-first", Reason: "quota_exceeded", Type: "saved_group",
+		})
+		assertEntityCount(t, testDB, `SELECT COUNT(*) FROM groups WHERE id = 'quota-group-first'`, 0)
+
+		if _, err := testDB.Exec(t.Context(), `UPDATE groups SET is_deleted = 2 WHERE id = 'quota-group-retained'`); err != nil {
+			t.Fatalf("terminalize retained group: %v", err)
+		}
+		secondRecorder := pushSync(t, testDB, userID, limits, model.SyncPushEntities{
+			Groups: []model.Group{{ID: "quota-group-second", WorkspaceID: &workspaceID, Name: "Second", Color: "blue"}},
+		})
+		assertSyncStatusOK(t, secondRecorder)
+		if rejected := decodeSyncPushResponse(t, secondRecorder).Rejected; len(rejected) != 0 {
+			t.Fatalf("saved group after terminal release rejected = %#v", rejected)
+		}
+		assertEntityCount(t, testDB, `SELECT COUNT(*) FROM groups WHERE id = 'quota-group-second'`, 1)
+	})
 }
 
 func assertSyncStatusOK(t *testing.T, recorder *httptest.ResponseRecorder) {

@@ -2,46 +2,29 @@ package handler
 
 import "testing"
 
-func testStringPointer(value string) *string {
-	return &value
-}
-
 func TestClassifyParent(t *testing.T) {
 	tests := []struct {
-		name        string
-		parentID    *string
-		allowNil    bool
-		owned       entityIDSet
-		accepted    entityIDSet
-		unavailable entityIDSet
-		wantReason  string
-		wantParent  string
+		name         string
+		parentID     string
+		owned        map[string]struct{}
+		accepted     map[string]struct{}
+		unavailable  parentAvailability
+		wantAccepted bool
+		wantReason   string
 	}{
-		{name: "owned", parentID: testStringPointer("owned"), owned: entityIDSet{"owned": {}}, wantReason: ""},
-		{name: "accepted", parentID: testStringPointer("accepted"), accepted: entityIDSet{"accepted": {}}, wantReason: ""},
-		{name: "rejected", parentID: testStringPointer("rejected"), unavailable: entityIDSet{"rejected": {}}, wantReason: "parent_rejected", wantParent: "rejected"},
-		{name: "missing", parentID: testStringPointer("missing"), wantReason: "invalid_parent", wantParent: "missing"},
-		{name: "allowed nil", parentID: nil, allowNil: true, wantReason: ""},
-		{name: "required nil", parentID: nil, allowNil: false, wantReason: "invalid_parent"},
+		{name: "owned active", parentID: "owned", owned: map[string]struct{}{"owned": {}}, wantAccepted: true},
+		{name: "accepted in request", parentID: "accepted", accepted: map[string]struct{}{"accepted": {}}, wantAccepted: true},
+		{name: "rejected in request", parentID: "rejected", unavailable: parentAvailability{"rejected": "parent_rejected"}, wantReason: "parent_rejected"},
+		{name: "soft-deleted parent", parentID: "deleted", unavailable: parentAvailability{"deleted": "parent_deleted"}, wantReason: "parent_deleted"},
+		{name: "terminal parent", parentID: "terminal", unavailable: parentAvailability{"terminal": "permanently_deleted"}, wantReason: "permanently_deleted"},
+		{name: "missing", parentID: "missing", wantReason: "invalid_parent"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			rejection := classifyParent(
-				"child-1", "collection", test.parentID, "workspace", test.allowNil,
-				test.owned, test.accepted, test.unavailable,
-			)
-			if test.wantReason == "" {
-				if rejection != nil {
-					t.Fatalf("expected accepted parent, got %#v", rejection)
-				}
-				return
-			}
-			if rejection == nil || rejection.Reason != test.wantReason {
-				t.Fatalf("rejection = %#v, want %q", rejection, test.wantReason)
-			}
-			if rejection.ID != "child-1" || rejection.Type != "collection" || rejection.ParentType != "workspace" || rejection.ParentID != test.wantParent {
-				t.Fatalf("unexpected context: %#v", rejection)
+			accepted, reason := classifyParent(test.parentID, test.owned, test.accepted, test.unavailable)
+			if accepted != test.wantAccepted || reason != test.wantReason {
+				t.Fatalf("classifyParent() = (%t, %q), want (%t, %q)", accepted, reason, test.wantAccepted, test.wantReason)
 			}
 		})
 	}

@@ -116,20 +116,35 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	now := time.Now().UnixMilli()
 	var rejected []model.Rejected
 	ownedWorkspaceIDs := entityIDSet{}
-	if len(req.Entities.Collections) > 0 || len(req.Entities.Groups) > 0 {
-		rows, queryErr := tx.Query(ctx, `SELECT id FROM workspaces WHERE user_id = $1`, userID)
+	unavailableWorkspaceIDs := parentAvailability{}
+	if len(req.Entities.Workspaces) > 0 || len(req.Entities.Collections) > 0 || len(req.Entities.Groups) > 0 {
+		rows, queryErr := tx.Query(ctx, `SELECT id, is_deleted FROM workspaces WHERE user_id = $1`, userID)
 		if queryErr != nil {
 			respondSyncDatabaseError(c, "workspace parent query", userID, workspaceChildIDs, queryErr)
 			return
 		}
 		for rows.Next() {
-			var id string
-			if scanErr := rows.Scan(&id); scanErr != nil {
+			var (
+				id        string
+				isDeleted int
+			)
+			if scanErr := rows.Scan(&id, &isDeleted); scanErr != nil {
 				rows.Close()
 				respondSyncDatabaseError(c, "workspace parent scan", userID, workspaceChildIDs, scanErr)
 				return
 			}
-			ownedWorkspaceIDs.Add(id)
+			if req.ProtocolVersion != 2 {
+				ownedWorkspaceIDs.Add(id)
+				continue
+			}
+			switch isDeleted {
+			case 0:
+				ownedWorkspaceIDs.Add(id)
+			case 1:
+				unavailableWorkspaceIDs.Set(id, model.RejectionReasonParentDeleted)
+			case 2:
+				unavailableWorkspaceIDs.Set(id, model.RejectionReasonPermanentlyDeleted)
+			}
 		}
 		rows.Close()
 		if rowsErr := rows.Err(); rowsErr != nil {
@@ -139,20 +154,49 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	}
 
 	ownedCollectionIDs := entityIDSet{}
+	unavailableCollectionIDs := parentAvailability{}
 	if len(req.Entities.Bookmarks) > 0 {
-		rows, queryErr := tx.Query(ctx, `SELECT id FROM collections WHERE user_id = $1`, userID)
+		rows, queryErr := tx.Query(ctx, `
+			SELECT c.id, c.is_deleted, c.workspace_id, w.is_deleted
+			FROM collections c
+			LEFT JOIN workspaces w ON w.id = c.workspace_id AND w.user_id = c.user_id
+			WHERE c.user_id = $1`, userID)
 		if queryErr != nil {
 			respondSyncDatabaseError(c, "collection parent query", userID, bookmarkIDs, queryErr)
 			return
 		}
 		for rows.Next() {
-			var id string
-			if scanErr := rows.Scan(&id); scanErr != nil {
+			var (
+				id             string
+				isDeleted      int
+				workspaceID    *string
+				workspaceState *int
+			)
+			if scanErr := rows.Scan(&id, &isDeleted, &workspaceID, &workspaceState); scanErr != nil {
 				rows.Close()
 				respondSyncDatabaseError(c, "collection parent scan", userID, bookmarkIDs, scanErr)
 				return
 			}
-			ownedCollectionIDs.Add(id)
+			if req.ProtocolVersion != 2 {
+				ownedCollectionIDs.Add(id)
+				continue
+			}
+			switch {
+			case isDeleted == 2:
+				unavailableCollectionIDs.Set(id, model.RejectionReasonPermanentlyDeleted)
+			case isDeleted == 1:
+				unavailableCollectionIDs.Set(id, model.RejectionReasonParentDeleted)
+			case workspaceID == nil:
+				ownedCollectionIDs.Add(id)
+			case workspaceState == nil:
+				// The collection points at an unowned or missing Workspace.
+			case *workspaceState == 1:
+				unavailableCollectionIDs.Set(id, model.RejectionReasonParentDeleted)
+			case *workspaceState == 2:
+				unavailableCollectionIDs.Set(id, model.RejectionReasonPermanentlyDeleted)
+			default:
+				ownedCollectionIDs.Add(id)
+			}
 		}
 		rows.Close()
 		if rowsErr := rows.Err(); rowsErr != nil {
@@ -162,9 +206,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	}
 
 	acceptedWorkspaceIDs := entityIDSet{}
-	unavailableWorkspaceIDs := entityIDSet{}
 	acceptedCollectionIDs := entityIDSet{}
-	unavailableCollectionIDs := entityIDSet{}
 	var searchUpserts []search.BookmarkDoc
 	var searchDeletes []string
 
@@ -219,7 +261,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	wsQuotaCount := 0
 	if limits.MaxWorkspaces != -1 && len(req.Entities.Workspaces) > 0 {
 		rows, err := tx.Query(ctx,
-			`SELECT id FROM workspaces WHERE user_id = $1 AND deleted_at IS NULL`, userID)
+			`SELECT id FROM workspaces WHERE user_id = $1 AND is_deleted < 2`, userID)
 		if err != nil {
 			respondSyncDatabaseError(c, "workspace quota query", userID, workspaceIDs, err)
 			return
@@ -271,7 +313,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	groupQuotaCount := 0
 	if limits.MaxSavedGroups != -1 && len(req.Entities.Groups) > 0 {
 		rows, err := tx.Query(ctx,
-			`SELECT id FROM groups WHERE user_id = $1 AND deleted_at IS NULL`, userID)
+			`SELECT id FROM groups WHERE user_id = $1 AND is_deleted < 2`, userID)
 		if err != nil {
 			respondSyncDatabaseError(c, "saved group quota query", userID, groupIDs, err)
 			return
@@ -293,15 +335,41 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		groupQuotaCount = len(activeGroupIDs)
 	}
 
+	activeBookmarkIDs := make(map[string]struct{})
+	bookmarkQuotaCount := 0
+	if limits.MaxBookmarks != -1 && len(req.Entities.Bookmarks) > 0 {
+		rows, err := tx.Query(ctx,
+			`SELECT id FROM bookmarks WHERE user_id = $1 AND is_trashed < 2`, userID)
+		if err != nil {
+			respondSyncDatabaseError(c, "bookmark quota query", userID, bookmarkIDs, err)
+			return
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				respondSyncDatabaseError(c, "bookmark quota scan", userID, bookmarkIDs, err)
+				return
+			}
+			activeBookmarkIDs[id] = struct{}{}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			respondSyncDatabaseError(c, "bookmark quota iteration", userID, bookmarkIDs, err)
+			return
+		}
+		bookmarkQuotaCount = len(activeBookmarkIDs)
+	}
+
 	// ── Workspaces ────────────────────────────────────────────────────────────
 	var wsUpserts []model.SyncWorkspaceMutation
 	legacyDeletedWorkspaceIDs := []string{}
 	queueWorkspaceUpsert := func(ws model.SyncWorkspaceMutation) {
-		if ws.DeletedAt == nil && limits.MaxWorkspaces != -1 {
+		if limits.MaxWorkspaces != -1 {
 			if _, exists := activeWSIDs[ws.ID]; !exists {
 				if wsQuotaCount >= limits.MaxWorkspaces {
 					rejected = append(rejected, model.Rejected{ID: ws.ID, Reason: "quota_exceeded", Type: "workspace"})
-					unavailableWorkspaceIDs.Add(ws.ID)
+					unavailableWorkspaceIDs.Set(ws.ID, "parent_rejected")
 					return
 				}
 				wsQuotaCount++
@@ -323,29 +391,84 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		if rejection != nil {
 			rejected = append(rejected, *rejection)
 			if !legacyMetadataWorkspaceIDSet.Has(ws.ID) {
-				unavailableWorkspaceIDs.Add(ws.ID)
+				unavailableWorkspaceIDs.Set(ws.ID, "parent_rejected")
 			}
 			continue
 		}
 		acceptedWorkspaceIDs.Add(ws.ID)
 		ownedWorkspaceIDs.Add(ws.ID)
-		unavailableWorkspaceIDs.Add(ws.ID)
+		unavailableWorkspaceIDs.Set(ws.ID, "parent_rejected")
 		deletedLegacyMetadataWorkspaces.Add(ws.ID)
 		legacyDeletedWorkspaceIDs = append(legacyDeletedWorkspaceIDs, ws.ID)
 		searchDeletes = append(searchDeletes, effect.SearchDeletes...)
 		searchUpserts = append(searchUpserts, effect.SearchUpserts...)
 	}
 	for _, ws := range req.Entities.Workspaces {
-		if req.ProtocolVersion == 0 && ws.DeletedAt != nil {
+		if req.ProtocolVersion == 0 {
+			if ws.DeletedAt != nil {
+				continue
+			}
+			if deletedLegacyMetadataWorkspaces.Has(ws.ID) {
+				rejected = append(rejected, model.Rejected{
+					ID: ws.ID, Reason: model.RejectionReasonWorkspaceDeleted, Type: "workspace",
+				})
+				unavailableWorkspaceIDs.Set(ws.ID, "parent_rejected")
+				continue
+			}
+			queueWorkspaceUpsert(ws)
 			continue
 		}
-		if ws.DeletedAt == nil && deletedLegacyMetadataWorkspaces.Has(ws.ID) {
-			rejected = append(rejected, model.Rejected{
-				ID: ws.ID, Reason: model.RejectionReasonWorkspaceDeleted, Type: "workspace",
-			})
-			unavailableWorkspaceIDs.Add(ws.ID)
+
+		if req.ProtocolVersion != 2 {
+			queueWorkspaceUpsert(ws)
 			continue
 		}
+
+		if ws.LifecycleAction != "" {
+			effect, rejection, lifecycleErr := h.lifecycle.ApplyInTx(
+				ctx, tx, userID, ws.ID, ws.LifecycleAction, 1, seq, now,
+			)
+			if lifecycleErr != nil {
+				respondSyncDatabaseError(c, "workspace lifecycle", userID, []string{ws.ID}, lifecycleErr)
+				return
+			}
+			if rejection != nil {
+				rejected = append(rejected, *rejection)
+				if !ownedWorkspaceIDs.Has(ws.ID) {
+					if _, exists := unavailableWorkspaceIDs[ws.ID]; !exists {
+						unavailableWorkspaceIDs.Set(ws.ID, "parent_rejected")
+					}
+				}
+				continue
+			}
+
+			searchDeletes = append(searchDeletes, effect.SearchDeletes...)
+			searchUpserts = append(searchUpserts, effect.SearchUpserts...)
+			switch ws.LifecycleAction {
+			case model.WorkspaceLifecycleDelete:
+				ownedWorkspaceIDs.Delete(ws.ID)
+				acceptedWorkspaceIDs.Delete(ws.ID)
+				unavailableWorkspaceIDs.Set(ws.ID, model.RejectionReasonParentDeleted)
+			case model.WorkspaceLifecycleRestore:
+				ownedWorkspaceIDs.Add(ws.ID)
+				acceptedWorkspaceIDs.Add(ws.ID)
+				unavailableWorkspaceIDs.Delete(ws.ID)
+			case model.WorkspaceLifecyclePurge:
+				ownedWorkspaceIDs.Delete(ws.ID)
+				acceptedWorkspaceIDs.Delete(ws.ID)
+				unavailableWorkspaceIDs.Set(ws.ID, model.RejectionReasonPermanentlyDeleted)
+			}
+			continue
+		}
+
+		if reason, exists := unavailableWorkspaceIDs[ws.ID]; exists {
+			if reason == model.RejectionReasonParentDeleted {
+				reason = model.RejectionReasonWorkspaceDeleted
+			}
+			rejected = append(rejected, model.Rejected{ID: ws.ID, Reason: reason, Type: "workspace"})
+			continue
+		}
+		ws.DeletedAt = nil
 		queueWorkspaceUpsert(ws)
 	}
 	if len(wsUpserts) > 0 {
@@ -370,7 +493,9 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			if ct.RowsAffected() == 0 {
 				rejected = append(rejected, staleRejection(ws.ID, "workspace"))
 				if !ownedWorkspaceIDs.Has(ws.ID) {
-					unavailableWorkspaceIDs.Add(ws.ID)
+					if _, exists := unavailableWorkspaceIDs[ws.ID]; !exists {
+						unavailableWorkspaceIDs.Set(ws.ID, "parent_rejected")
+					}
 				}
 				continue
 			}
@@ -399,7 +524,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				respondSyncDatabaseError(c, "legacy workspace collection scan", userID, legacyDeletedWorkspaceIDs, scanErr)
 				return
 			}
-			unavailableCollectionIDs.Add(id)
+			unavailableCollectionIDs.Set(id, "parent_rejected")
 		}
 		rows.Close()
 		if rowsErr := rows.Err(); rowsErr != nil {
@@ -411,19 +536,19 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	// ── Collections ───────────────────────────────────────────────────────────
 	var colUpserts []model.Collection
 	for _, col := range req.Entities.Collections {
-		if dependency := classifyParent(
+		if dependency := classifyParentRejection(
 			col.ID, "collection", col.WorkspaceID, "workspace", true,
 			ownedWorkspaceIDs, acceptedWorkspaceIDs, unavailableWorkspaceIDs,
 		); dependency != nil {
 			rejected = append(rejected, *dependency)
-			unavailableCollectionIDs.Add(col.ID)
+			unavailableCollectionIDs.Set(col.ID, dependency.Reason)
 			continue
 		}
-		if col.DeletedAt == nil && col.ArchivedAt == nil && limits.MaxCollections != -1 {
+		if col.IsDeleted < 2 && limits.MaxCollections != -1 {
 			if _, exists := activeColIDs[col.ID]; !exists {
 				if colQuotaCount >= limits.MaxCollections {
 					rejected = append(rejected, model.Rejected{ID: col.ID, Reason: "quota_exceeded", Type: "collection"})
-					unavailableCollectionIDs.Add(col.ID)
+					unavailableCollectionIDs.Set(col.ID, "parent_rejected")
 					continue
 				}
 				colQuotaCount++
@@ -454,7 +579,9 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			if ct.RowsAffected() == 0 {
 				rejected = append(rejected, staleRejection(col.ID, "collection"))
 				if !ownedCollectionIDs.Has(col.ID) {
-					unavailableCollectionIDs.Add(col.ID)
+					if _, exists := unavailableCollectionIDs[col.ID]; !exists {
+						unavailableCollectionIDs.Set(col.ID, "parent_rejected")
+					}
 				}
 			} else if col.IsDeleted == 2 {
 				// Cascade permanent deletion to any remaining bookmarks in this collection.
@@ -464,8 +591,19 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				cascadeIDs = append(cascadeIDs, col.ID)
 			}
 			if ct.RowsAffected() > 0 {
-				acceptedCollectionIDs.Add(col.ID)
-				ownedCollectionIDs.Add(col.ID)
+				if req.ProtocolVersion != 2 || col.IsDeleted == 0 {
+					acceptedCollectionIDs.Add(col.ID)
+					ownedCollectionIDs.Add(col.ID)
+					unavailableCollectionIDs.Delete(col.ID)
+				} else if col.IsDeleted == 1 {
+					acceptedCollectionIDs.Delete(col.ID)
+					ownedCollectionIDs.Delete(col.ID)
+					unavailableCollectionIDs.Set(col.ID, model.RejectionReasonParentDeleted)
+				} else {
+					acceptedCollectionIDs.Delete(col.ID)
+					ownedCollectionIDs.Delete(col.ID)
+					unavailableCollectionIDs.Set(col.ID, model.RejectionReasonPermanentlyDeleted)
+				}
 			}
 		}
 		if closeErr := br.Close(); closeErr != nil {
@@ -497,12 +635,23 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	// ── Bookmarks ─────────────────────────────────────────────────────────────
 	var bookmarkUpserts []model.Bookmark
 	for _, bookmark := range req.Entities.Bookmarks {
-		if dependency := classifyParent(
+		if dependency := classifyParentRejection(
 			bookmark.ID, "bookmark", bookmark.CollectionID, "collection", true,
 			ownedCollectionIDs, acceptedCollectionIDs, unavailableCollectionIDs,
 		); dependency != nil {
 			rejected = append(rejected, *dependency)
 			continue
+		}
+		if bookmark.IsTrashed < 2 && limits.MaxBookmarks != -1 {
+			if _, exists := activeBookmarkIDs[bookmark.ID]; !exists {
+				if bookmarkQuotaCount >= limits.MaxBookmarks {
+					rejected = append(rejected, model.Rejected{
+						ID: bookmark.ID, Reason: "quota_exceeded", Type: "bookmark",
+					})
+					continue
+				}
+				bookmarkQuotaCount++
+			}
 		}
 		bookmarkUpserts = append(bookmarkUpserts, bookmark)
 	}
@@ -589,14 +738,14 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	// ── Groups ────────────────────────────────────────────────────────────────
 	var groupUpserts []model.Group
 	for _, g := range req.Entities.Groups {
-		if dependency := classifyParent(
+		if dependency := classifyParentRejection(
 			g.ID, "saved_group", g.WorkspaceID, "workspace", false,
 			ownedWorkspaceIDs, acceptedWorkspaceIDs, unavailableWorkspaceIDs,
 		); dependency != nil {
 			rejected = append(rejected, *dependency)
 			continue
 		}
-		if g.DeletedAt == nil && limits.MaxSavedGroups != -1 {
+		if g.IsDeleted < 2 && limits.MaxSavedGroups != -1 {
 			if _, exists := activeGroupIDs[g.ID]; !exists {
 				if groupQuotaCount >= limits.MaxSavedGroups {
 					rejected = append(rejected, model.Rejected{ID: g.ID, Reason: "quota_exceeded", Type: "saved_group"})
