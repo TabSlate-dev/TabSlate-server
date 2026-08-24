@@ -175,6 +175,206 @@ func TestWorkspaceLifecycle_RestoreParentOnly(t *testing.T) {
 	}
 }
 
+func TestWorkspaceLifecycle_LegacyDeleteCascade(t *testing.T) {
+	testDB := openWorkspaceLifecycleTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+		email:    "workspace-lifecycle-legacy-delete@example.com",
+		password: "password123",
+	})
+	insertLegacyWorkspaceLifecycleFixture(t, testDB, userID, "legacy-delete", 0, 1, 40)
+	insertWorkspaceLifecycleRoot(t, testDB, userID, "legacy-delete-sibling", 0)
+
+	tx, err := testDB.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin legacy delete transaction: %v", err)
+	}
+	service := NewWorkspaceLifecycleService(testDB, pubsub.NewInMemoryHub(), nil)
+	effect, rejection, err := service.ApplyInTx(
+		t.Context(), tx, userID, "legacy-delete", model.WorkspaceLifecycleDelete, 0, 90, 9000,
+	)
+	if err != nil {
+		t.Fatalf("legacy delete: %v", err)
+	}
+	if rejection != nil {
+		t.Fatalf("legacy delete rejection = %#v", rejection)
+	}
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatalf("commit legacy delete: %v", err)
+	}
+
+	if !effect.Changed || effect.Seq != 90 {
+		t.Fatalf("legacy delete effect = %#v, want changed seq 90", effect)
+	}
+	wantSearchDeletes := []string{"legacy-delete-bookmark-active", "legacy-delete-bookmark-archived"}
+	sort.Strings(effect.SearchDeletes)
+	if !reflect.DeepEqual(effect.SearchDeletes, wantSearchDeletes) {
+		t.Fatalf("legacy delete search deletes = %#v, want %#v", effect.SearchDeletes, wantSearchDeletes)
+	}
+	assertWorkspaceLifecycleRoot(t, testDB, "legacy-delete", workspaceLifecycleRootExpectation{
+		name:          "Workspace legacy-delete",
+		icon:          stringPtr("icon-legacy-delete"),
+		color:         stringPtr("color-legacy-delete"),
+		position:      17,
+		seq:           90,
+		isDeleted:     1,
+		deletionModel: 0,
+		deletedAtSet:  true,
+	})
+	assertLegacyWorkspaceLifecycleState(t, testDB, "legacy-delete", legacyWorkspaceLifecycleExpectation{
+		activeCollection:           lifecycleRowState{state: 1, seq: 90, deletedAt: int64Ptr(9000)},
+		archivedCollection:         lifecycleRowState{state: 1, seq: 90, deletedAt: int64Ptr(9000)},
+		trashedCollection:          lifecycleRowState{state: 1, seq: 12, deletedAt: int64Ptr(7012)},
+		activeBookmark:             lifecycleRowState{state: 1, seq: 90, deletedAt: int64Ptr(9000)},
+		archivedBookmarkState:      lifecycleRowState{state: 1, seq: 90, deletedAt: int64Ptr(9000)},
+		trashedBookmark:            lifecycleRowState{state: 1, seq: 13, deletedAt: int64Ptr(7013)},
+		contradictoryBookmark:      lifecycleRowState{state: 1, seq: 40, deletedAt: int64Ptr(7090)},
+		activeGroup:                lifecycleRowState{state: 1, seq: 90, deletedAt: int64Ptr(9000)},
+		trashedGroup:               lifecycleRowState{state: 1, seq: 14, deletedAt: int64Ptr(7014)},
+		archivedAt:                 int64Ptr(6032),
+		archivedBookmarkIsArchived: true,
+	})
+}
+
+func TestWorkspaceLifecycle_LegacyDeleteRollsBackAtomically(t *testing.T) {
+	testDB := openWorkspaceLifecycleTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+		email:    "workspace-lifecycle-legacy-delete-rollback@example.com",
+		password: "password123",
+	})
+	insertLegacyWorkspaceLifecycleFixture(t, testDB, userID, "legacy-delete-rollback", 0, 1, 40)
+	insertWorkspaceLifecycleRoot(t, testDB, userID, "legacy-delete-rollback-sibling", 0)
+	beforeRoot := workspaceLifecycleRootSnapshot(t, testDB, "legacy-delete-rollback")
+	beforeDescendants := workspaceLifecycleDescendantSnapshot(t, testDB, "legacy-delete-rollback")
+
+	tx, err := testDB.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin legacy delete rollback transaction: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	installWorkspaceLifecycleUpdateFailingTrigger(t, tx, "groups")
+	service := NewWorkspaceLifecycleService(testDB, pubsub.NewInMemoryHub(), nil)
+	_, rejection, err := service.ApplyInTx(
+		t.Context(), tx, userID, "legacy-delete-rollback", model.WorkspaceLifecycleDelete, 0, 90, 9000,
+	)
+	if err == nil {
+		t.Fatal("legacy delete with failing groups trigger returned nil error")
+	}
+	if rejection != nil {
+		t.Fatalf("legacy delete rollback rejection = %#v", rejection)
+	}
+	if rollbackErr := tx.Rollback(t.Context()); rollbackErr != nil && rollbackErr != pgx.ErrTxClosed {
+		t.Fatalf("rollback failed legacy transaction: %v", rollbackErr)
+	}
+
+	afterRoot := workspaceLifecycleRootSnapshot(t, testDB, "legacy-delete-rollback")
+	afterDescendants := workspaceLifecycleDescendantSnapshot(t, testDB, "legacy-delete-rollback")
+	if afterRoot != beforeRoot || !reflect.DeepEqual(afterDescendants, beforeDescendants) {
+		t.Fatalf("legacy delete was not atomic\nroot before=%s\nroot after=%s\ndescendants before=%#v\ndescendants after=%#v",
+			beforeRoot, afterRoot, beforeDescendants, afterDescendants)
+	}
+}
+
+func TestWorkspaceLifecycle_LegacyRestoreUsesSequenceEvidenceOnce(t *testing.T) {
+	testDB := openWorkspaceLifecycleTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+		email:    "workspace-lifecycle-legacy-restore@example.com",
+		password: "password123",
+	})
+	insertLegacyWorkspaceLifecycleFixture(t, testDB, userID, "legacy-restore", 1, 0, 90)
+	insertWorkspaceLifecycleRoot(t, testDB, userID, "legacy-restore-sibling", 0)
+
+	tx, err := testDB.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin legacy restore transaction: %v", err)
+	}
+	service := NewWorkspaceLifecycleService(testDB, pubsub.NewInMemoryHub(), nil)
+	effect, rejection, err := service.ApplyInTx(
+		t.Context(), tx, userID, "legacy-restore", model.WorkspaceLifecycleRestore, 1, 91, 9100,
+	)
+	if err != nil {
+		t.Fatalf("legacy restore: %v", err)
+	}
+	if rejection != nil {
+		t.Fatalf("legacy restore rejection = %#v", rejection)
+	}
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatalf("commit legacy restore: %v", err)
+	}
+
+	if !effect.Changed || effect.Seq != 91 || len(effect.SearchDeletes) != 0 {
+		t.Fatalf("legacy restore effect = %#v, want changed seq 91 with no search deletes", effect)
+	}
+	wantSearchUpserts := []search.BookmarkDoc{
+		{
+			ID:           "legacy-restore-bookmark-active",
+			UserID:       userID,
+			Title:        "Legacy active bookmark",
+			URL:          "https://legacy-active.example.com",
+			Description:  "Legacy active description",
+			CollectionID: "legacy-restore-collection-active",
+			IsArchived:   false,
+		},
+		{
+			ID:           "legacy-restore-bookmark-archived",
+			UserID:       userID,
+			Title:        "Legacy archived bookmark",
+			URL:          "https://legacy-archived.example.com",
+			Description:  "Legacy archived description",
+			CollectionID: "legacy-restore-collection-archived",
+			IsArchived:   false,
+		},
+	}
+	sort.Slice(effect.SearchUpserts, func(i, j int) bool {
+		return effect.SearchUpserts[i].ID < effect.SearchUpserts[j].ID
+	})
+	if !reflect.DeepEqual(effect.SearchUpserts, wantSearchUpserts) {
+		t.Fatalf("legacy restore search upserts = %#v, want %#v", effect.SearchUpserts, wantSearchUpserts)
+	}
+	assertWorkspaceLifecycleRoot(t, testDB, "legacy-restore", workspaceLifecycleRootExpectation{
+		name:          "Workspace legacy-restore",
+		icon:          stringPtr("icon-legacy-restore"),
+		color:         stringPtr("color-legacy-restore"),
+		position:      17,
+		seq:           91,
+		isDeleted:     0,
+		deletionModel: 1,
+		deletedAtSet:  false,
+	})
+	assertLegacyWorkspaceLifecycleState(t, testDB, "legacy-restore", legacyWorkspaceLifecycleExpectation{
+		activeCollection:           lifecycleRowState{state: 0, seq: 91},
+		archivedCollection:         lifecycleRowState{state: 0, seq: 91},
+		trashedCollection:          lifecycleRowState{state: 1, seq: 12, deletedAt: int64Ptr(7012)},
+		activeBookmark:             lifecycleRowState{state: 0, seq: 91},
+		archivedBookmarkState:      lifecycleRowState{state: 0, seq: 91},
+		trashedBookmark:            lifecycleRowState{state: 1, seq: 13, deletedAt: int64Ptr(7013)},
+		contradictoryBookmark:      lifecycleRowState{state: 1, seq: 90, deletedAt: int64Ptr(7090)},
+		activeGroup:                lifecycleRowState{state: 0, seq: 91},
+		trashedGroup:               lifecycleRowState{state: 1, seq: 14, deletedAt: int64Ptr(7014)},
+		archivedAt:                 int64Ptr(6032),
+		archivedBookmarkIsArchived: false,
+	})
+
+	repeatTx, err := testDB.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin repeated legacy restore transaction: %v", err)
+	}
+	repeatEffect, repeatRejection, err := service.ApplyInTx(
+		t.Context(), repeatTx, userID, "legacy-restore", model.WorkspaceLifecycleRestore, 1, 92, 9200,
+	)
+	if err != nil {
+		t.Fatalf("repeat legacy restore: %v", err)
+	}
+	if repeatRejection != nil {
+		t.Fatalf("repeat legacy restore rejection = %#v", repeatRejection)
+	}
+	if err := repeatTx.Commit(t.Context()); err != nil {
+		t.Fatalf("commit repeated legacy restore: %v", err)
+	}
+	if repeatEffect.Changed || repeatEffect.Seq != 91 || len(repeatEffect.SearchUpserts) != 0 {
+		t.Fatalf("repeat legacy restore effect = %#v, want one-time unchanged seq 91", repeatEffect)
+	}
+}
+
 func TestWorkspaceLifecycle_RejectLastActive(t *testing.T) {
 	testDB := openWorkspaceLifecycleTestDB(t)
 	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
@@ -351,9 +551,117 @@ type workspaceLifecycleDescendantCounts struct {
 	groupTabs   int
 }
 
+type lifecycleRowState struct {
+	state     int
+	seq       int64
+	deletedAt *int64
+}
+
+type legacyWorkspaceLifecycleExpectation struct {
+	activeCollection           lifecycleRowState
+	archivedCollection         lifecycleRowState
+	trashedCollection          lifecycleRowState
+	activeBookmark             lifecycleRowState
+	archivedBookmarkState      lifecycleRowState
+	trashedBookmark            lifecycleRowState
+	contradictoryBookmark      lifecycleRowState
+	activeGroup                lifecycleRowState
+	trashedGroup               lifecycleRowState
+	archivedAt                 *int64
+	archivedBookmarkIsArchived bool
+}
+
 func openWorkspaceLifecycleTestDB(t *testing.T) *db.DB {
 	t.Helper()
 	return openSyncTestDB(t)
+}
+
+func insertLegacyWorkspaceLifecycleFixture(
+	t *testing.T,
+	testDB *db.DB,
+	userID string,
+	workspaceID string,
+	isDeleted int,
+	deletionModel int,
+	workspaceSeq int64,
+) {
+	t.Helper()
+	var workspaceDeletedAt *int64
+	if isDeleted == 1 {
+		workspaceDeletedAt = int64Ptr(9000)
+	}
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO workspaces
+			(id, user_id, name, icon, color, position, seq, deleted_at, is_deleted, deletion_model, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, 17, $6, $7, $8, $9, 444, 555)`,
+		workspaceID, userID, "Workspace "+workspaceID, "icon-"+workspaceID, "color-"+workspaceID,
+		workspaceSeq, workspaceDeletedAt, isDeleted, deletionModel,
+	); err != nil {
+		t.Fatalf("insert legacy workspace fixture: %v", err)
+	}
+
+	cascadeState := 0
+	cascadeSeq := int64(31)
+	var cascadeDeletedAt *int64
+	if isDeleted == 1 {
+		cascadeState = 1
+		cascadeSeq = workspaceSeq
+		cascadeDeletedAt = int64Ptr(9000)
+	}
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO collections
+			(id, user_id, workspace_id, name, icon, position, seq, deleted_at, archived_at, is_deleted, created_at, updated_at)
+		VALUES
+			($1, $2, $3, 'Legacy active collection', NULL, 1, $4, $5, NULL, $6, 444, 555),
+			($7, $2, $3, 'Legacy archived collection', NULL, 2, $4, $5, 6032, $6, 444, 555),
+			($8, $2, $3, 'Independent trashed collection', NULL, 3, 12, 7012, NULL, 1, 444, 555)`,
+		workspaceID+"-collection-active", userID, workspaceID, cascadeSeq, cascadeDeletedAt, cascadeState,
+		workspaceID+"-collection-archived", workspaceID+"-collection-trashed",
+	); err != nil {
+		t.Fatalf("insert legacy collection fixtures: %v", err)
+	}
+
+	bookmarkSeq := int64(33)
+	if isDeleted == 1 {
+		bookmarkSeq = workspaceSeq
+	}
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO bookmarks
+			(id, user_id, collection_id, title, url, favicon_url, description, is_favorite, is_archived,
+			 is_trashed, tag_ids, position, seq, deleted_at, created_at, updated_at)
+		VALUES
+			($1, $2, $3, 'Legacy active bookmark', 'https://legacy-active.example.com', NULL,
+			 'Legacy active description', FALSE, FALSE, $4, '{}', 1, $5, $6, 444, 555),
+			($7, $2, $8, 'Legacy archived bookmark', 'https://legacy-archived.example.com', NULL,
+			 'Legacy archived description', FALSE, TRUE, $4, '{}', 2, $5, $6, 444, 555),
+			($9, $2, $3, 'Independent trashed bookmark', 'https://independent-trash.example.com', NULL,
+			 'Independent trash description', FALSE, FALSE, 1, '{}', 3, 13, 7013, 444, 555),
+			($10, $2, $11, 'Contradictory bookmark', 'https://contradictory.example.com', NULL,
+			 'Contradictory evidence', FALSE, FALSE, 1, '{}', 4, $12, 7090, 444, 555)`,
+		workspaceID+"-bookmark-active", userID, workspaceID+"-collection-active", cascadeState,
+		bookmarkSeq, cascadeDeletedAt,
+		workspaceID+"-bookmark-archived", workspaceID+"-collection-archived",
+		workspaceID+"-bookmark-trashed", workspaceID+"-bookmark-contradictory",
+		workspaceID+"-collection-trashed", workspaceSeq,
+	); err != nil {
+		t.Fatalf("insert legacy bookmark fixtures: %v", err)
+	}
+
+	groupSeq := int64(35)
+	if isDeleted == 1 {
+		groupSeq = workspaceSeq
+	}
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO groups
+			(id, user_id, workspace_id, name, color, is_compact, seq, deleted_at, is_deleted, created_at, updated_at)
+		VALUES
+			($1, $2, $3, 'Legacy active group', 'blue', FALSE, $4, $5, $6, 444, 555),
+			($7, $2, $3, 'Independent trashed group', 'red', FALSE, 14, 7014, 1, 444, 555)`,
+		workspaceID+"-group-active", userID, workspaceID, groupSeq, cascadeDeletedAt, cascadeState,
+		workspaceID+"-group-trashed",
+	); err != nil {
+		t.Fatalf("insert legacy group fixtures: %v", err)
+	}
 }
 
 func insertWorkspaceLifecycleFixture(t *testing.T, testDB *db.DB, userID, workspaceID string, isDeleted int) {
@@ -506,6 +814,97 @@ func assertWorkspaceLifecycleRoot(t *testing.T, testDB *db.DB, workspaceID strin
 	}
 }
 
+func assertLegacyWorkspaceLifecycleState(
+	t *testing.T,
+	testDB *db.DB,
+	workspaceID string,
+	want legacyWorkspaceLifecycleExpectation,
+) {
+	t.Helper()
+	assertLifecycleCollectionState(t, testDB, workspaceID+"-collection-active", want.activeCollection, nil)
+	assertLifecycleCollectionState(t, testDB, workspaceID+"-collection-archived", want.archivedCollection, want.archivedAt)
+	assertLifecycleCollectionState(t, testDB, workspaceID+"-collection-trashed", want.trashedCollection, nil)
+	assertLifecycleBookmarkState(t, testDB, workspaceID+"-bookmark-active", want.activeBookmark, false)
+	assertLifecycleBookmarkState(
+		t, testDB, workspaceID+"-bookmark-archived", want.archivedBookmarkState, want.archivedBookmarkIsArchived,
+	)
+	assertLifecycleBookmarkState(t, testDB, workspaceID+"-bookmark-trashed", want.trashedBookmark, false)
+	assertLifecycleBookmarkState(t, testDB, workspaceID+"-bookmark-contradictory", want.contradictoryBookmark, false)
+	assertLifecycleGroupState(t, testDB, workspaceID+"-group-active", want.activeGroup)
+	assertLifecycleGroupState(t, testDB, workspaceID+"-group-trashed", want.trashedGroup)
+}
+
+func assertLifecycleCollectionState(
+	t *testing.T,
+	testDB *db.DB,
+	collectionID string,
+	want lifecycleRowState,
+	wantArchivedAt *int64,
+) {
+	t.Helper()
+	var (
+		state      int
+		seq        int64
+		deletedAt  *int64
+		archivedAt *int64
+	)
+	if err := testDB.QueryRow(t.Context(), `
+		SELECT is_deleted, seq, deleted_at, archived_at
+		FROM collections WHERE id = $1`, collectionID,
+	).Scan(&state, &seq, &deletedAt, &archivedAt); err != nil {
+		t.Fatalf("query collection lifecycle state %q: %v", collectionID, err)
+	}
+	if state != want.state || seq != want.seq || !reflect.DeepEqual(deletedAt, want.deletedAt) ||
+		!reflect.DeepEqual(archivedAt, wantArchivedAt) {
+		t.Fatalf("collection %q lifecycle = {state:%d seq:%d deletedAt:%v archivedAt:%v}, want state=%#v archivedAt=%v",
+			collectionID, state, seq, deletedAt, archivedAt, want, wantArchivedAt)
+	}
+}
+
+func assertLifecycleBookmarkState(
+	t *testing.T,
+	testDB *db.DB,
+	bookmarkID string,
+	want lifecycleRowState,
+	wantArchived bool,
+) {
+	t.Helper()
+	var (
+		state      int
+		seq        int64
+		deletedAt  *int64
+		isArchived bool
+	)
+	if err := testDB.QueryRow(t.Context(), `
+		SELECT is_trashed, seq, deleted_at, is_archived
+		FROM bookmarks WHERE id = $1`, bookmarkID,
+	).Scan(&state, &seq, &deletedAt, &isArchived); err != nil {
+		t.Fatalf("query bookmark lifecycle state %q: %v", bookmarkID, err)
+	}
+	if state != want.state || seq != want.seq || !reflect.DeepEqual(deletedAt, want.deletedAt) || isArchived != wantArchived {
+		t.Fatalf("bookmark %q lifecycle = {state:%d seq:%d deletedAt:%v archived:%t}, want state=%#v archived=%t",
+			bookmarkID, state, seq, deletedAt, isArchived, want, wantArchived)
+	}
+}
+
+func assertLifecycleGroupState(t *testing.T, testDB *db.DB, groupID string, want lifecycleRowState) {
+	t.Helper()
+	var (
+		state     int
+		seq       int64
+		deletedAt *int64
+	)
+	if err := testDB.QueryRow(t.Context(), `
+		SELECT is_deleted, seq, deleted_at
+		FROM groups WHERE id = $1`, groupID,
+	).Scan(&state, &seq, &deletedAt); err != nil {
+		t.Fatalf("query group lifecycle state %q: %v", groupID, err)
+	}
+	if state != want.state || seq != want.seq || !reflect.DeepEqual(deletedAt, want.deletedAt) {
+		t.Fatalf("group %q lifecycle = {state:%d seq:%d deletedAt:%v}, want %#v", groupID, state, seq, deletedAt, want)
+	}
+}
+
 func assertWorkspaceLifecycleDescendantCounts(
 	t *testing.T,
 	testDB *db.DB,
@@ -550,6 +949,26 @@ func installWorkspaceLifecycleFailingTrigger(t *testing.T, tx pgx.Tx, table stri
 		triggerName, event, table, functionName,
 	)); err != nil {
 		t.Fatalf("create failing %s trigger: %v", table, err)
+	}
+}
+
+func installWorkspaceLifecycleUpdateFailingTrigger(t *testing.T, tx pgx.Tx, table string) {
+	t.Helper()
+	functionName := "test_workspace_lifecycle_update_fail_" + table
+	triggerName := "test_workspace_lifecycle_update_fail_" + table
+	if _, err := tx.Exec(t.Context(), fmt.Sprintf(`
+		CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			RAISE EXCEPTION 'forced workspace lifecycle %s update failure';
+		END
+		$$`, functionName, table)); err != nil {
+		t.Fatalf("create failing %s update function: %v", table, err)
+	}
+	if _, err := tx.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TRIGGER %s BEFORE UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION %s()",
+		triggerName, table, functionName,
+	)); err != nil {
+		t.Fatalf("create failing %s update trigger: %v", table, err)
 	}
 }
 

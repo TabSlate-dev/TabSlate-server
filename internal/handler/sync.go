@@ -31,12 +31,16 @@ func NewSyncHandler(
 	bp billing.Provider,
 	lifecycle ...*WorkspaceLifecycleService,
 ) *SyncHandler {
+	lifecycleService := firstWorkspaceLifecycleService(lifecycle)
+	if lifecycleService == nil {
+		lifecycleService = NewWorkspaceLifecycleService(d, hub, sc)
+	}
 	return &SyncHandler{
 		db:        d,
 		search:    sc,
 		hub:       hub,
 		billing:   bp,
-		lifecycle: firstWorkspaceLifecycleService(lifecycle),
+		lifecycle: lifecycleService,
 	}
 }
 
@@ -161,6 +165,51 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	unavailableWorkspaceIDs := entityIDSet{}
 	acceptedCollectionIDs := entityIDSet{}
 	unavailableCollectionIDs := entityIDSet{}
+	var searchUpserts []search.BookmarkDoc
+	var searchDeletes []string
+
+	legacyMetadataWorkspaceIDs := []string{}
+	legacyMetadataWorkspaceIDSet := entityIDSet{}
+	if req.ProtocolVersion == 0 {
+		for _, workspace := range req.Entities.Workspaces {
+			if workspace.DeletedAt == nil {
+				legacyMetadataWorkspaceIDs = append(legacyMetadataWorkspaceIDs, workspace.ID)
+				legacyMetadataWorkspaceIDSet.Add(workspace.ID)
+			}
+		}
+	}
+	deletedLegacyMetadataWorkspaces := entityIDSet{}
+	if len(legacyMetadataWorkspaceIDs) > 0 {
+		rows, queryErr := tx.Query(ctx, `
+			SELECT id, is_deleted
+			FROM workspaces
+			WHERE user_id = $1 AND is_deleted < 2
+			ORDER BY id
+			FOR UPDATE`, userID)
+		if queryErr != nil {
+			respondSyncDatabaseError(c, "legacy workspace metadata query", userID, legacyMetadataWorkspaceIDs, queryErr)
+			return
+		}
+		for rows.Next() {
+			var (
+				id        string
+				isDeleted int
+			)
+			if scanErr := rows.Scan(&id, &isDeleted); scanErr != nil {
+				rows.Close()
+				respondSyncDatabaseError(c, "legacy workspace metadata scan", userID, legacyMetadataWorkspaceIDs, scanErr)
+				return
+			}
+			if legacyMetadataWorkspaceIDSet.Has(id) && isDeleted == 1 {
+				deletedLegacyMetadataWorkspaces.Add(id)
+			}
+		}
+		rows.Close()
+		if rowsErr := rows.Err(); rowsErr != nil {
+			respondSyncDatabaseError(c, "legacy workspace metadata iteration", userID, legacyMetadataWorkspaceIDs, rowsErr)
+			return
+		}
+	}
 
 	// ── Pre-fetch quota baselines ─────────────────────────────────────────────
 	// One query per quota-limited entity type, regardless of push size.
@@ -246,7 +295,36 @@ func (h *SyncHandler) Push(c *gin.Context) {
 
 	// ── Workspaces ────────────────────────────────────────────────────────────
 	var wsUpserts []model.SyncWorkspaceMutation
+	legacyDeletedWorkspaceIDs := []string{}
 	for _, ws := range req.Entities.Workspaces {
+		if deletedLegacyMetadataWorkspaces.Has(ws.ID) {
+			rejected = append(rejected, model.Rejected{
+				ID: ws.ID, Reason: model.RejectionReasonWorkspaceDeleted, Type: "workspace",
+			})
+			unavailableWorkspaceIDs.Add(ws.ID)
+			continue
+		}
+		if req.ProtocolVersion == 0 && ws.DeletedAt != nil {
+			effect, rejection, lifecycleErr := h.lifecycle.ApplyInTx(
+				ctx, tx, userID, ws.ID, model.WorkspaceLifecycleDelete, 0, seq, now,
+			)
+			if lifecycleErr != nil {
+				respondSyncDatabaseError(c, "legacy workspace delete", userID, []string{ws.ID}, lifecycleErr)
+				return
+			}
+			if rejection != nil {
+				rejected = append(rejected, *rejection)
+				unavailableWorkspaceIDs.Add(ws.ID)
+				continue
+			}
+			acceptedWorkspaceIDs.Add(ws.ID)
+			ownedWorkspaceIDs.Add(ws.ID)
+			unavailableWorkspaceIDs.Add(ws.ID)
+			legacyDeletedWorkspaceIDs = append(legacyDeletedWorkspaceIDs, ws.ID)
+			searchDeletes = append(searchDeletes, effect.SearchDeletes...)
+			searchUpserts = append(searchUpserts, effect.SearchUpserts...)
+			continue
+		}
 		if ws.DeletedAt == nil && limits.MaxWorkspaces != -1 {
 			if _, exists := activeWSIDs[ws.ID]; !exists {
 				if wsQuotaCount >= limits.MaxWorkspaces {
@@ -290,6 +368,31 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		}
 		if closeErr := br.Close(); closeErr != nil {
 			respondSyncDatabaseError(c, "close workspace batch", userID, workspaceIDs, closeErr)
+			return
+		}
+	}
+	if len(legacyDeletedWorkspaceIDs) > 0 {
+		rows, queryErr := tx.Query(ctx, `
+			SELECT id
+			FROM collections
+			WHERE user_id = $1 AND workspace_id = ANY($2)
+			ORDER BY id`, userID, legacyDeletedWorkspaceIDs)
+		if queryErr != nil {
+			respondSyncDatabaseError(c, "legacy workspace collection query", userID, legacyDeletedWorkspaceIDs, queryErr)
+			return
+		}
+		for rows.Next() {
+			var id string
+			if scanErr := rows.Scan(&id); scanErr != nil {
+				rows.Close()
+				respondSyncDatabaseError(c, "legacy workspace collection scan", userID, legacyDeletedWorkspaceIDs, scanErr)
+				return
+			}
+			unavailableCollectionIDs.Add(id)
+		}
+		rows.Close()
+		if rowsErr := rows.Err(); rowsErr != nil {
+			respondSyncDatabaseError(c, "legacy workspace collection iteration", userID, legacyDeletedWorkspaceIDs, rowsErr)
 			return
 		}
 	}
@@ -379,9 +482,6 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			}
 		}
 	}
-
-	var searchUpserts []search.BookmarkDoc
-	var searchDeletes []string
 
 	// ── Bookmarks ─────────────────────────────────────────────────────────────
 	var bookmarkUpserts []model.Bookmark

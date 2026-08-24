@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/TabSlate-dev/TabSlate-server/billing"
@@ -68,7 +69,18 @@ func pushSync(
 	entities model.SyncPushEntities,
 ) *httptest.ResponseRecorder {
 	t.Helper()
-	body, err := json.Marshal(model.SyncPushRequest{Entities: entities})
+	return pushSyncRequest(t, testDB, userID, limits, model.SyncPushRequest{Entities: entities})
+}
+
+func pushSyncRequest(
+	t *testing.T,
+	testDB *db.DB,
+	userID string,
+	limits billing.Limits,
+	request model.SyncPushRequest,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(request)
 	if err != nil {
 		t.Fatalf("marshal sync request: %v", err)
 	}
@@ -78,7 +90,9 @@ func pushSync(
 	ginContext.Request = httptest.NewRequest(http.MethodPost, "/sync/push", bytes.NewReader(body))
 	ginContext.Request.Header.Set("Content-Type", "application/json")
 	ginContext.Set(middleware.UserIDKey, userID)
-	handler := NewSyncHandler(testDB, nil, pubsub.NewInMemoryHub(), fixedLimitsProvider{limits: limits})
+	hub := pubsub.NewInMemoryHub()
+	lifecycle := NewWorkspaceLifecycleService(testDB, hub, nil)
+	handler := NewSyncHandler(testDB, nil, hub, fixedLimitsProvider{limits: limits}, lifecycle)
 	handler.Push(ginContext)
 	return recorder
 }
@@ -137,6 +151,99 @@ func TestSyncPullCapabilities(t *testing.T) {
 	}
 	if workspace.Icon != nil || workspace.Color != nil {
 		t.Fatalf("workspace icon/color = %v/%v, want nil/nil", workspace.Icon, workspace.Color)
+	}
+}
+
+func TestSyncPush_LegacyWorkspaceDeleteCascade(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+		email:    "sync-legacy-workspace-delete@example.com",
+		password: "password123",
+	})
+	insertLegacyWorkspaceLifecycleFixture(t, testDB, userID, "sync-legacy-delete", 0, 1, 40)
+	insertWorkspaceLifecycleRoot(t, testDB, userID, "sync-legacy-delete-sibling", 0)
+	deletedAt := int64(8000)
+
+	recorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+		Entities: model.SyncPushEntities{
+			Workspaces: []model.SyncWorkspaceMutation{{
+				ID:        "sync-legacy-delete",
+				Name:      "Ignored legacy metadata",
+				Position:  99,
+				DeletedAt: &deletedAt,
+			}},
+		},
+	})
+	assertSyncStatusOK(t, recorder)
+	response := decodeSyncPushResponse(t, recorder)
+	if len(response.Rejected) != 0 {
+		t.Fatalf("legacy delete rejected = %#v, want none", response.Rejected)
+	}
+
+	var (
+		rootSeq       int64
+		isDeleted     int
+		deletionModel int
+		rootDeletedAt *int64
+		name          string
+		position      int
+	)
+	if err := testDB.QueryRow(t.Context(), `
+		SELECT seq, is_deleted, deletion_model, deleted_at, name, position
+		FROM workspaces WHERE id = 'sync-legacy-delete'`,
+	).Scan(&rootSeq, &isDeleted, &deletionModel, &rootDeletedAt, &name, &position); err != nil {
+		t.Fatalf("query legacy-deleted workspace: %v", err)
+	}
+	if rootSeq != response.ServerSeq || isDeleted != 1 || deletionModel != 0 || rootDeletedAt == nil ||
+		name != "Workspace sync-legacy-delete" || position != 17 {
+		t.Fatalf("legacy-deleted workspace = {seq:%d state:%d model:%d deletedAt:%v name:%q position:%d}, server seq=%d",
+			rootSeq, isDeleted, deletionModel, rootDeletedAt, name, position, response.ServerSeq)
+	}
+	assertLegacyWorkspaceLifecycleState(t, testDB, "sync-legacy-delete", legacyWorkspaceLifecycleExpectation{
+		activeCollection:           lifecycleRowState{state: 1, seq: response.ServerSeq, deletedAt: rootDeletedAt},
+		archivedCollection:         lifecycleRowState{state: 1, seq: response.ServerSeq, deletedAt: rootDeletedAt},
+		trashedCollection:          lifecycleRowState{state: 1, seq: 12, deletedAt: int64Ptr(7012)},
+		activeBookmark:             lifecycleRowState{state: 1, seq: response.ServerSeq, deletedAt: rootDeletedAt},
+		archivedBookmarkState:      lifecycleRowState{state: 1, seq: response.ServerSeq, deletedAt: rootDeletedAt},
+		trashedBookmark:            lifecycleRowState{state: 1, seq: 13, deletedAt: int64Ptr(7013)},
+		contradictoryBookmark:      lifecycleRowState{state: 1, seq: 40, deletedAt: int64Ptr(7090)},
+		activeGroup:                lifecycleRowState{state: 1, seq: response.ServerSeq, deletedAt: rootDeletedAt},
+		trashedGroup:               lifecycleRowState{state: 1, seq: 14, deletedAt: int64Ptr(7014)},
+		archivedAt:                 int64Ptr(6032),
+		archivedBookmarkIsArchived: true,
+	})
+}
+
+func TestSyncPush_LegacyWorkspaceMetadataCannotRestoreParentTombstone(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+		email:    "sync-legacy-workspace-metadata@example.com",
+		password: "password123",
+	})
+	insertWorkspaceLifecycleFixture(t, testDB, userID, "sync-parent-tombstone", 1)
+	beforeRoot := workspaceLifecycleRootSnapshot(t, testDB, "sync-parent-tombstone")
+	beforeDescendants := workspaceLifecycleDescendantSnapshot(t, testDB, "sync-parent-tombstone")
+
+	recorder := pushSync(t, testDB, userID, syncTestLimits(), model.SyncPushEntities{
+		Workspaces: []model.SyncWorkspaceMutation{{
+			ID:       "sync-parent-tombstone",
+			Name:     "Must not restore",
+			Position: 99,
+		}},
+	})
+	assertSyncStatusOK(t, recorder)
+	response := decodeSyncPushResponse(t, recorder)
+	assertRejected(t, response, model.Rejected{
+		ID: "sync-parent-tombstone", Reason: model.RejectionReasonWorkspaceDeleted, Type: "workspace",
+	})
+	if len(response.Rejected) != 1 {
+		t.Fatalf("legacy metadata rejected = %#v, want only workspace_deleted", response.Rejected)
+	}
+	afterRoot := workspaceLifecycleRootSnapshot(t, testDB, "sync-parent-tombstone")
+	afterDescendants := workspaceLifecycleDescendantSnapshot(t, testDB, "sync-parent-tombstone")
+	if afterRoot != beforeRoot || !reflect.DeepEqual(afterDescendants, beforeDescendants) {
+		t.Fatalf("legacy metadata restored or changed parent tombstone\nroot before=%s\nroot after=%s\ndescendants before=%#v\ndescendants after=%#v",
+			beforeRoot, afterRoot, beforeDescendants, afterDescendants)
 	}
 }
 
