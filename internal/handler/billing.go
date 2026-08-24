@@ -24,12 +24,13 @@ type planResponse struct {
 	Subscription *billing.Subscription `json:"subscription"`
 	Limits       *billing.Limits       `json:"limits"`
 	Usage        planUsage             `json:"usage"`
+	TrashUsage   planUsage             `json:"trash_usage"`
 }
 
 type planUsage struct {
 	Workspaces  int `json:"workspaces"`
-	Bookmarks   int `json:"bookmarks"`
 	Collections int `json:"collections"`
+	Bookmarks   int `json:"bookmarks"`
 	Tags        int `json:"tags"`
 	SavedGroups int `json:"saved_groups"`
 }
@@ -90,43 +91,73 @@ func (h *BillingHandler) GetPlan(c *gin.Context) {
 	}
 
 	usage := planUsage{}
-
-	if err := h.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM workspaces WHERE user_id = $1 AND deleted_at IS NULL`,
+	trashUsage := planUsage{}
+	if err := h.db.QueryRow(ctx, `
+		WITH workspace_usage AS (
+			SELECT
+				COUNT(*) FILTER (WHERE is_deleted < 2) AS total,
+				COUNT(*) FILTER (WHERE is_deleted = 1) AS trash
+			FROM workspaces
+			WHERE user_id = $1
+		), collection_usage AS (
+			SELECT
+				COUNT(*) FILTER (WHERE c.is_deleted < 2) AS total,
+				COUNT(*) FILTER (
+					WHERE c.is_deleted < 2 AND (c.is_deleted = 1 OR w.is_deleted = 1)
+				) AS trash
+			FROM collections c
+			LEFT JOIN workspaces w ON w.id = c.workspace_id AND w.user_id = c.user_id
+			WHERE c.user_id = $1
+		), bookmark_usage AS (
+			SELECT
+				COUNT(*) FILTER (WHERE b.is_trashed < 2) AS total,
+				COUNT(*) FILTER (
+					WHERE b.is_trashed < 2
+					  AND (b.is_trashed = 1 OR c.is_deleted = 1 OR w.is_deleted = 1)
+				) AS trash
+			FROM bookmarks b
+			LEFT JOIN collections c ON c.id = b.collection_id AND c.user_id = b.user_id
+			LEFT JOIN workspaces w ON w.id = c.workspace_id AND w.user_id = c.user_id
+			WHERE b.user_id = $1
+		), tag_usage AS (
+			SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL) AS total
+			FROM tags
+			WHERE user_id = $1
+		), group_usage AS (
+			SELECT
+				COUNT(*) FILTER (WHERE g.is_deleted < 2) AS total,
+				COUNT(*) FILTER (
+					WHERE g.is_deleted < 2 AND (g.is_deleted = 1 OR w.is_deleted = 1)
+				) AS trash
+			FROM groups g
+			LEFT JOIN workspaces w ON w.id = g.workspace_id AND w.user_id = g.user_id
+			WHERE g.user_id = $1
+		)
+		SELECT
+			workspace_usage.total,
+			collection_usage.total,
+			bookmark_usage.total,
+			tag_usage.total,
+			group_usage.total,
+			workspace_usage.trash,
+			collection_usage.trash,
+			bookmark_usage.trash,
+			0,
+			group_usage.trash
+		FROM workspace_usage, collection_usage, bookmark_usage, tag_usage, group_usage`,
 		userID,
-	).Scan(&usage.Workspaces); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch usage"})
-		return
-	}
-
-	if err := h.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM bookmarks WHERE user_id = $1 AND is_trashed < 2`,
-		userID,
-	).Scan(&usage.Bookmarks); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch usage"})
-		return
-	}
-
-	if err := h.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM collections WHERE user_id = $1 AND is_deleted < 2`,
-		userID,
-	).Scan(&usage.Collections); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch usage"})
-		return
-	}
-
-	if err := h.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM tags WHERE user_id = $1 AND deleted_at IS NULL`,
-		userID,
-	).Scan(&usage.Tags); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch usage"})
-		return
-	}
-
-	if err := h.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM groups WHERE user_id = $1 AND deleted_at IS NULL`,
-		userID,
-	).Scan(&usage.SavedGroups); err != nil {
+	).Scan(
+		&usage.Workspaces,
+		&usage.Collections,
+		&usage.Bookmarks,
+		&usage.Tags,
+		&usage.SavedGroups,
+		&trashUsage.Workspaces,
+		&trashUsage.Collections,
+		&trashUsage.Bookmarks,
+		&trashUsage.Tags,
+		&trashUsage.SavedGroups,
+	); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch usage"})
 		return
 	}
@@ -135,6 +166,7 @@ func (h *BillingHandler) GetPlan(c *gin.Context) {
 		Subscription: subscription,
 		Limits:       limits,
 		Usage:        usage,
+		TrashUsage:   trashUsage,
 	})
 }
 

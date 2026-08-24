@@ -69,7 +69,7 @@ func (h *WorkspaceHandler) Create(c *gin.Context) {
 	}
 	if limits.MaxWorkspaces != -1 {
 		var count int
-		if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM workspaces WHERE user_id = $1 AND deleted_at IS NULL`, userID).Scan(&count); err != nil {
+		if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM workspaces WHERE user_id = $1 AND is_deleted < 2`, userID).Scan(&count); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
 			return
 		}
