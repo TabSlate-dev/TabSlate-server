@@ -57,6 +57,32 @@ For the complete list of tunable parameters (such as rate limits and specific ma
 
 ---
 
+## API
+
+All routes below require `Authorization: Bearer <access_token>` unless noted otherwise. See `ARCHITECTURE.md` for the full route table and the "Workspace 生命周期" section for the underlying state machine.
+
+### Workspace lifecycle
+
+A Workspace has a three-state lifecycle (`0` active → `1` soft-deleted/retained → `2` permanently deleted). All three routes below are handled by the same `WorkspaceLifecycleService` used by the sync-push `lifecycle_action` path and by the daily retention-expiry job — there is no separate implementation per entry point.
+
+| Method | Path | Effect | Success |
+|---|---|---|---|
+| `DELETE` | `/workspaces/:id` | Soft delete (state `0`→`1`) | `204 No Content` |
+| `POST` | `/workspaces/:id/restore` | Restore (state `1`→`0`; a Workspace that was originally deleted by a pre-migration client restores its collections/bookmarks/groups along with it) | `200 OK` `{"id": "...", "seq": N}` |
+| `DELETE` | `/workspaces/:id/permanent` | Permanent delete / purge (state → `2`; hard-deletes all descendant collections, bookmarks, groups, and group tabs) | `204 No Content` |
+
+All three are idempotent: repeating a call after it already succeeded returns the same success status without changing anything further.
+
+On rejection, the response body is `{"id": "<workspace_id>", "reason": "<reason>", "type": "workspace"}`:
+
+| Reason | Applies to | HTTP status | Meaning |
+|---|---|---|---|
+| `last_active_workspace` | `DELETE /workspaces/:id` | `409 Conflict` | The user has only one active Workspace left; deleting it is refused |
+| `permanently_deleted` | `DELETE /workspaces/:id`, `POST /workspaces/:id/restore` | `410 Gone` | The target has already been purged (state `2`) — this also covers a delete or restore that was queued offline before another device (or the retention-expiry job) purged the Workspace in the meantime |
+| `stale` | all three routes | `404 Not Found` | Unknown Workspace ID, or (for `DELETE /workspaces/:id/permanent`) the target is still active (state `0`) and must be soft-deleted first |
+
+---
+
 ## License
 
 TabSlate Server is free software: you can redistribute it and/or modify it
