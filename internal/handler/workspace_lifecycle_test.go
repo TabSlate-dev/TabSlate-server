@@ -321,7 +321,7 @@ func TestWorkspaceLifecycle_LegacyRestoreUsesSequenceEvidenceOnce(t *testing.T) 
 			URL:          "https://legacy-archived.example.com",
 			Description:  "Legacy archived description",
 			CollectionID: "legacy-restore-collection-archived",
-			IsArchived:   false,
+			IsArchived:   true,
 		},
 	}
 	sort.Slice(effect.SearchUpserts, func(i, j int) bool {
@@ -351,7 +351,7 @@ func TestWorkspaceLifecycle_LegacyRestoreUsesSequenceEvidenceOnce(t *testing.T) 
 		activeGroup:                lifecycleRowState{state: 0, seq: 91},
 		trashedGroup:               lifecycleRowState{state: 1, seq: 14, deletedAt: int64Ptr(7014)},
 		archivedAt:                 int64Ptr(6032),
-		archivedBookmarkIsArchived: false,
+		archivedBookmarkIsArchived: true,
 	})
 
 	repeatTx, err := testDB.Begin(t.Context())

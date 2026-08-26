@@ -340,9 +340,12 @@ func restoreLegacyWorkspaceBookmarks(
 	seq int64,
 	now int64,
 ) ([]search.BookmarkDoc, error) {
+	// is_archived is left untouched: applyLegacyDeleteInTx never clears it on
+	// delete (only is_trashed), so an archived bookmark caught in the legacy
+	// delete cascade must come back archived, not active.
 	rows, err := tx.Query(ctx, `
 		UPDATE bookmarks
-		SET is_trashed = 0, is_archived = FALSE, deleted_at = NULL, seq = $1, updated_at = $2
+		SET is_trashed = 0, deleted_at = NULL, seq = $1, updated_at = $2
 		WHERE user_id = $3
 		  AND collection_id = ANY($4)
 		  AND is_trashed = 1

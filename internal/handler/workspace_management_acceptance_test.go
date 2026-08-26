@@ -287,7 +287,7 @@ func TestWorkspaceManagementAcceptance(t *testing.T) {
 			activeGroup:                lifecycleRowState{state: 0, seq: 22},
 			trashedGroup:               lifecycleRowState{state: 1, seq: 14, deletedAt: int64Ptr(7014)},
 			archivedAt:                 int64Ptr(6032),
-			archivedBookmarkIsArchived: false,
+			archivedBookmarkIsArchived: true,
 		})
 	})
 }
