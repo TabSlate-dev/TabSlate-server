@@ -121,21 +121,42 @@ func (h *BookmarkHandler) Create(c *gin.Context) {
 		return
 	}
 
-	tag, err := tx.Exec(ctx,
-		`INSERT INTO bookmarks (id, user_id, collection_id, title, url, favicon_url,
-		  description, is_favorite, is_archived, is_trashed, position, seq, created_at, updated_at)
-		 SELECT $1,$2,c.id,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13
-		 FROM collections c
-		 JOIN workspaces w ON w.id=c.workspace_id AND w.user_id=c.user_id
-		 WHERE c.id=$3 AND c.user_id=$2 AND c.deleted_at IS NULL AND c.is_deleted=0 AND w.is_deleted=0`,
-		id, userID, req.CollectionID, req.Title, req.URL, req.FaviconURL,
-		req.Description, req.IsFavorite, req.IsArchived, boolToInt(req.IsTrashed), req.Position, seq, now,
-	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create bookmark"})
-		return
+	// A nil/empty collection_id means "uncategorized" — there is no parent to
+	// validate, so it bypasses the collection/workspace join entirely rather
+	// than joining against a NULL id (which always matches zero rows and
+	// would wrongly report "collection not found").
+	var rowsAffected int64
+	if req.CollectionID == nil || *req.CollectionID == "" {
+		tag, execErr := tx.Exec(ctx,
+			`INSERT INTO bookmarks (id, user_id, collection_id, title, url, favicon_url,
+			  description, is_favorite, is_archived, is_trashed, position, seq, created_at, updated_at)
+			 VALUES ($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)`,
+			id, userID, req.Title, req.URL, req.FaviconURL,
+			req.Description, req.IsFavorite, req.IsArchived, boolToInt(req.IsTrashed), req.Position, seq, now,
+		)
+		if execErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create bookmark"})
+			return
+		}
+		rowsAffected = tag.RowsAffected()
+	} else {
+		tag, execErr := tx.Exec(ctx,
+			`INSERT INTO bookmarks (id, user_id, collection_id, title, url, favicon_url,
+			  description, is_favorite, is_archived, is_trashed, position, seq, created_at, updated_at)
+			 SELECT $1,$2,c.id,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13
+			 FROM collections c
+			 JOIN workspaces w ON w.id=c.workspace_id AND w.user_id=c.user_id
+			 WHERE c.id=$3 AND c.user_id=$2 AND c.deleted_at IS NULL AND c.is_deleted=0 AND w.is_deleted=0`,
+			id, userID, req.CollectionID, req.Title, req.URL, req.FaviconURL,
+			req.Description, req.IsFavorite, req.IsArchived, boolToInt(req.IsTrashed), req.Position, seq, now,
+		)
+		if execErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create bookmark"})
+			return
+		}
+		rowsAffected = tag.RowsAffected()
 	}
-	if tag.RowsAffected() == 0 {
+	if rowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "collection not found"})
 		return
 	}

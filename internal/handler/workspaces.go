@@ -196,7 +196,10 @@ func (h *WorkspaceHandler) applyLifecycle(
 	id := c.Param("id")
 	effect, rejection, err := h.lifecycle.Apply(c.Request.Context(), userID, id, action, 1)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "workspace lifecycle failed"})
+		// Reuse the Sync handler's classification: a serialization failure
+		// (40001/40P01) on this same Serializable service should tell the
+		// client to back off and retry, not look like a permanent failure.
+		respondSyncDatabaseError(c, "workspace lifecycle", userID, []string{id}, err)
 		return
 	}
 	if rejection != nil {

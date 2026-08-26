@@ -229,7 +229,7 @@ func (h *CollectionHandler) Delete(c *gin.Context) {
 	}
 
 	tag, err := tx.Exec(ctx,
-		`UPDATE collections c SET deleted_at=$1, seq=$2, updated_at=$1
+		`UPDATE collections c SET deleted_at=$1, is_deleted=1, seq=$2, updated_at=$1
 		 FROM workspaces w
 		 WHERE c.id=$3 AND c.user_id=$4 AND c.deleted_at IS NULL
 		   AND w.id=c.workspace_id AND w.user_id=c.user_id AND w.is_deleted=0`,

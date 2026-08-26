@@ -70,6 +70,16 @@ func (s *WorkspaceLifecycleService) Apply(
 	return effect, nil, nil
 }
 
+// ApplyInTx's activeCount reflects only committed rows plus writes this exact
+// call has already made — not other, not-yet-flushed writes buffered
+// earlier in the same caller transaction (e.g. Sync's queued workspace
+// creations, which are batched and executed after the whole push loop). A
+// single push that both creates a new Workspace and deletes the current
+// last active one will therefore conservatively reject the delete with
+// last_active_workspace, even though the new Workspace will exist moments
+// later in the same transaction. This is safe (no state can be lost) but
+// stricter than necessary; a client hitting it should create the
+// replacement Workspace first, in an earlier push, then delete.
 func (s *WorkspaceLifecycleService) ApplyInTx(
 	ctx context.Context,
 	tx pgx.Tx,
