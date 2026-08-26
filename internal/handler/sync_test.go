@@ -720,13 +720,244 @@ func TestSyncPullWorkspaceLifecycleStatesRetainDescendantsAndCapability(t *testi
 			response.Entities.Collections, response.Entities.Bookmarks, response.Entities.Groups)
 	}
 
+	// Workspaces are always returned in full, never seq-filtered like every
+	// other entity type: the client's lifecycle coordinator needs an
+	// always-current view of every root's is_deleted state on every pull to
+	// safely reconcile pending delete/restore intents (a root missing from a
+	// delta because its own seq predates after_seq would be indistinguishable
+	// from one that no longer exists). Collections/Bookmarks/Groups are
+	// unaffected and stay correctly seq-filtered to an empty delta.
 	emptyResponse := pullSync(t, testDB, userID, response.ServerSeq)
 	if !emptyResponse.Capabilities.WorkspaceParentTombstone {
 		t.Fatal("empty delta workspace_parent_tombstone capability = false, want true")
 	}
-	if len(emptyResponse.Entities.Workspaces) != 0 || len(emptyResponse.Entities.Collections) != 0 ||
+	emptyDeltaStates := map[string]int{}
+	for _, workspace := range emptyResponse.Entities.Workspaces {
+		emptyDeltaStates[workspace.ID] = workspace.IsDeleted
+	}
+	if !reflect.DeepEqual(emptyDeltaStates, map[string]int{"pull-active": 0, "pull-deleted": 1, "pull-terminal": 2}) {
+		t.Fatalf("empty delta workspace states = %#v, want unchanged", emptyDeltaStates)
+	}
+	if len(emptyResponse.Entities.Collections) != 0 ||
 		len(emptyResponse.Entities.Bookmarks) != 0 || len(emptyResponse.Entities.Groups) != 0 {
-		t.Fatalf("empty delta entities = %#v, want empty", emptyResponse.Entities)
+		t.Fatalf("empty delta descendant entities = %#v, want empty", emptyResponse.Entities)
+	}
+}
+
+func TestSyncPushRejectsUnsupportedProtocolVersion(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-bad-protocol@example.com", password: "password123"})
+
+	for _, version := range []int{1, 3, -1} {
+		recorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+			ProtocolVersion: version,
+			Entities: model.SyncPushEntities{
+				Workspaces: []model.SyncWorkspaceMutation{{ID: "bad-protocol-ws", Name: "Should never be written"}},
+			},
+		})
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("protocol_version=%d: status = %d, want 400", version, recorder.Code)
+		}
+	}
+	assertEntityCount(t, testDB, `SELECT COUNT(*) FROM workspaces WHERE id = 'bad-protocol-ws'`, 0)
+}
+
+// TestSyncPushVersionlessClientCannotWriteDescendantsUnderUnavailableWorkspace
+// covers C1: a versionless (protocol_version omitted/0) push previously
+// treated every owned Workspace as a valid parent regardless of its
+// is_deleted state, letting a legacy client write live Collections and
+// Bookmarks under a retained or purged Workspace.
+func TestSyncPushVersionlessClientCannotWriteDescendantsUnderUnavailableWorkspace(t *testing.T) {
+	tests := []struct {
+		name       string
+		state      int
+		wantReason string
+	}{
+		{name: "retained", state: 1, wantReason: model.RejectionReasonParentDeleted},
+		{name: "purged", state: 2, wantReason: model.RejectionReasonPermanentlyDeleted},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			testDB := openSyncTestDB(t)
+			userID := insertAuthTestUser(t, testDB, authTestUserSeed{
+				email: "sync-legacy-unavailable-" + fmt.Sprint(test.state) + "@example.com", password: "password123",
+			})
+			workspaceID := "legacy-unavailable-" + fmt.Sprint(test.state)
+			collectionID := workspaceID + "-collection"
+			insertWorkspaceLifecycleRoot(t, testDB, userID, workspaceID, test.state)
+
+			recorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+				// ProtocolVersion omitted: versionless/legacy client.
+				Entities: model.SyncPushEntities{
+					Collections: []model.Collection{{ID: collectionID, WorkspaceID: &workspaceID, Name: "Should be rejected"}},
+				},
+			})
+			assertSyncStatusOK(t, recorder)
+			response := decodeSyncPushResponse(t, recorder)
+			assertRejected(t, response, model.Rejected{
+				ID: collectionID, Reason: test.wantReason, Type: "collection",
+				ParentID: workspaceID, ParentType: "workspace",
+			})
+			assertEntityCount(t, testDB, `SELECT COUNT(*) FROM collections WHERE id = '`+collectionID+`'`, 0)
+
+			// Same check one level deeper: a Bookmark under an existing
+			// active Collection whose Workspace is unavailable.
+			if _, err := testDB.Exec(t.Context(), `
+				INSERT INTO collections (id, user_id, workspace_id, name, position, seq, is_deleted, created_at, updated_at)
+				VALUES ($1, $2, $3, 'Existing collection', 0, 1, 0, 1, 1)`,
+				collectionID, userID, workspaceID,
+			); err != nil {
+				t.Fatalf("insert existing collection: %v", err)
+			}
+			bookmarkID := workspaceID + "-bookmark"
+			recorder = pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+				Entities: model.SyncPushEntities{
+					Bookmarks: []model.Bookmark{{ID: bookmarkID, CollectionID: &collectionID, Title: "Should be rejected", URL: "https://example.com"}},
+				},
+			})
+			assertSyncStatusOK(t, recorder)
+			response = decodeSyncPushResponse(t, recorder)
+			assertRejected(t, response, model.Rejected{
+				ID: bookmarkID, Reason: test.wantReason, Type: "bookmark",
+				ParentID: collectionID, ParentType: "collection",
+			})
+			assertEntityCount(t, testDB, `SELECT COUNT(*) FROM bookmarks WHERE id = '`+bookmarkID+`'`, 0)
+		})
+	}
+}
+
+// TestSyncPushLegacyMetadataCannotResurrectTerminalWorkspace covers C2: the
+// legacy metadata guard only locked/considered is_deleted<2 rows, so an
+// ordinary (non-delete) versionless metadata push against a scrubbed state-2
+// root fell through to the plain upsert and un-scrubbed it.
+func TestSyncPushLegacyMetadataCannotResurrectTerminalWorkspace(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-legacy-resurrect@example.com", password: "password123"})
+	workspaceID := "legacy-terminal"
+	insertWorkspaceLifecycleRoot(t, testDB, userID, workspaceID, 2)
+
+	recorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+		Entities: model.SyncPushEntities{
+			Workspaces: []model.SyncWorkspaceMutation{{ID: workspaceID, Name: "Resurrected", Position: 7}},
+		},
+	})
+	assertSyncStatusOK(t, recorder)
+	response := decodeSyncPushResponse(t, recorder)
+	assertRejected(t, response, model.Rejected{ID: workspaceID, Reason: model.RejectionReasonPermanentlyDeleted, Type: "workspace"})
+
+	var name string
+	var position int
+	var isDeleted int
+	if err := testDB.QueryRow(t.Context(),
+		`SELECT name, position, is_deleted FROM workspaces WHERE id = $1`, workspaceID,
+	).Scan(&name, &position, &isDeleted); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	if name != "" || position != 0 || isDeleted != 2 {
+		t.Fatalf("terminal workspace = {name:%q position:%d is_deleted:%d}, want scrubbed and unchanged", name, position, isDeleted)
+	}
+}
+
+// TestSyncPushV2CannotRescueRetainedDescendantByReparenting covers I1: the
+// Collection/Group push loops only validated the INCOMING target Workspace,
+// so a Collection or Group currently stored under a retained/purged Workspace
+// could be "rescued" by reparenting it to an active Workspace in the same
+// push, flattening it into an unrelated Workspace's tree.
+func TestSyncPushV2CannotRescueRetainedDescendantByReparenting(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-reparent-rescue@example.com", password: "password123"})
+	retainedWorkspaceID := "reparent-retained"
+	activeWorkspaceID := "reparent-active"
+	insertWorkspaceLifecycleRoot(t, testDB, userID, retainedWorkspaceID, 1)
+	insertWorkspaceLifecycleRoot(t, testDB, userID, activeWorkspaceID, 0)
+
+	collectionID := "reparent-collection"
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO collections (id, user_id, workspace_id, name, position, seq, is_deleted, created_at, updated_at)
+		VALUES ($1, $2, $3, 'Retained collection', 0, 1, 0, 1, 1)`,
+		collectionID, userID, retainedWorkspaceID,
+	); err != nil {
+		t.Fatalf("insert retained collection: %v", err)
+	}
+	groupID := "reparent-group"
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO groups (id, user_id, workspace_id, name, color, seq, is_deleted, created_at, updated_at)
+		VALUES ($1, $2, $3, 'Retained group', 'blue', 1, 0, 1, 1)`,
+		groupID, userID, retainedWorkspaceID,
+	); err != nil {
+		t.Fatalf("insert retained group: %v", err)
+	}
+
+	recorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+		ProtocolVersion: 2,
+		Entities: model.SyncPushEntities{
+			Collections: []model.Collection{{ID: collectionID, WorkspaceID: &activeWorkspaceID, Name: "Rescued collection"}},
+			Groups:      []model.Group{{ID: groupID, WorkspaceID: &activeWorkspaceID, Name: "Rescued group", Color: "blue"}},
+		},
+	})
+	assertSyncStatusOK(t, recorder)
+	response := decodeSyncPushResponse(t, recorder)
+	assertRejected(t, response, model.Rejected{
+		ID: collectionID, Reason: model.RejectionReasonParentDeleted, Type: "collection",
+		ParentID: retainedWorkspaceID, ParentType: "workspace",
+	})
+	assertRejected(t, response, model.Rejected{
+		ID: groupID, Reason: model.RejectionReasonParentDeleted, Type: "saved_group",
+		ParentID: retainedWorkspaceID, ParentType: "workspace",
+	})
+
+	var collectionWorkspaceID, groupWorkspaceID string
+	if err := testDB.QueryRow(t.Context(), `SELECT workspace_id FROM collections WHERE id = $1`, collectionID).Scan(&collectionWorkspaceID); err != nil {
+		t.Fatalf("read collection: %v", err)
+	}
+	if err := testDB.QueryRow(t.Context(), `SELECT workspace_id FROM groups WHERE id = $1`, groupID).Scan(&groupWorkspaceID); err != nil {
+		t.Fatalf("read group: %v", err)
+	}
+	if collectionWorkspaceID != retainedWorkspaceID {
+		t.Fatalf("collection workspace_id = %q, want unchanged %q", collectionWorkspaceID, retainedWorkspaceID)
+	}
+	if groupWorkspaceID != retainedWorkspaceID {
+		t.Fatalf("group workspace_id = %q, want unchanged %q", groupWorkspaceID, retainedWorkspaceID)
+	}
+}
+
+// TestSyncPushV2AllowsMovingBetweenActiveWorkspaces is the control case for
+// TestSyncPushV2CannotRescueRetainedDescendantByReparenting: reparenting must
+// still work normally when the CURRENT parent is active.
+func TestSyncPushV2AllowsMovingBetweenActiveWorkspaces(t *testing.T) {
+	testDB := openSyncTestDB(t)
+	userID := insertAuthTestUser(t, testDB, authTestUserSeed{email: "sync-reparent-active@example.com", password: "password123"})
+	sourceWorkspaceID := "reparent-source-active"
+	targetWorkspaceID := "reparent-target-active"
+	insertWorkspaceLifecycleRoot(t, testDB, userID, sourceWorkspaceID, 0)
+	insertWorkspaceLifecycleRoot(t, testDB, userID, targetWorkspaceID, 0)
+
+	collectionID := "reparent-active-collection"
+	if _, err := testDB.Exec(t.Context(), `
+		INSERT INTO collections (id, user_id, workspace_id, name, position, seq, is_deleted, created_at, updated_at)
+		VALUES ($1, $2, $3, 'Movable collection', 0, 1, 0, 1, 1)`,
+		collectionID, userID, sourceWorkspaceID,
+	); err != nil {
+		t.Fatalf("insert movable collection: %v", err)
+	}
+
+	recorder := pushSyncRequest(t, testDB, userID, syncTestLimits(), model.SyncPushRequest{
+		ProtocolVersion: 2,
+		Entities: model.SyncPushEntities{
+			Collections: []model.Collection{{ID: collectionID, WorkspaceID: &targetWorkspaceID, Name: "Moved collection"}},
+		},
+	})
+	assertSyncStatusOK(t, recorder)
+	response := decodeSyncPushResponse(t, recorder)
+	if len(response.Rejected) != 0 {
+		t.Fatalf("rejected = %#v, want none", response.Rejected)
+	}
+	var workspaceID string
+	if err := testDB.QueryRow(t.Context(), `SELECT workspace_id FROM collections WHERE id = $1`, collectionID).Scan(&workspaceID); err != nil {
+		t.Fatalf("read collection: %v", err)
+	}
+	if workspaceID != targetWorkspaceID {
+		t.Fatalf("collection workspace_id = %q, want %q", workspaceID, targetWorkspaceID)
 	}
 }
 

@@ -56,6 +56,11 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		return
 	}
 
+	if req.ProtocolVersion != 0 && req.ProtocolVersion != 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported protocol_version"})
+		return
+	}
+
 	// Enforce entity count limit.
 	total := len(req.Entities.Workspaces) + len(req.Entities.Collections) +
 		len(req.Entities.Bookmarks) + len(req.Entities.Tags) + len(req.Entities.Groups)
@@ -133,10 +138,10 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				respondSyncDatabaseError(c, "workspace parent scan", userID, workspaceChildIDs, scanErr)
 				return
 			}
-			if req.ProtocolVersion != 2 {
-				ownedWorkspaceIDs.Add(id)
-				continue
-			}
+			// Parent availability is a property of the stored row, not of the
+			// pushing client's protocol version — a versionless client must
+			// not be able to write live descendants under a retained or
+			// purged Workspace just because it doesn't send lifecycle_action.
 			switch isDeleted {
 			case 0:
 				ownedWorkspaceIDs.Add(id)
@@ -157,7 +162,7 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	unavailableCollectionIDs := parentAvailability{}
 	collectionStates := map[string]int{}
 	collectionWorkspaceIDs := map[string]string{}
-	if len(req.Entities.Bookmarks) > 0 {
+	if len(req.Entities.Bookmarks) > 0 || len(req.Entities.Collections) > 0 {
 		rows, queryErr := tx.Query(ctx, `
 			SELECT c.id, c.is_deleted, c.workspace_id, w.is_deleted
 			FROM collections c
@@ -183,10 +188,9 @@ func (h *SyncHandler) Push(c *gin.Context) {
 			if workspaceID != nil {
 				collectionWorkspaceIDs[id] = *workspaceID
 			}
-			if req.ProtocolVersion != 2 {
-				ownedCollectionIDs.Add(id)
-				continue
-			}
+			// Parent availability is a property of the stored row, not of the
+			// pushing client's protocol version (see the analogous Workspace
+			// classification above).
 			switch {
 			case isDeleted == 2:
 				unavailableCollectionIDs.Set(id, model.RejectionReasonPermanentlyDeleted)
@@ -207,6 +211,41 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		rows.Close()
 		if rowsErr := rows.Err(); rowsErr != nil {
 			respondSyncDatabaseError(c, "collection parent iteration", userID, bookmarkIDs, rowsErr)
+			return
+		}
+	}
+
+	// Saved Groups classify directly against their Workspace (no intermediate
+	// Collection layer). This snapshot only tracks each Group's CURRENTLY
+	// stored parent — its own is_deleted state is orthogonal (a Group may
+	// legitimately transition its own trash state in the same push) and must
+	// not be conflated with parent-availability the way this query is used
+	// below to reject a retained Group being "rescued" by reparenting it to
+	// an active Workspace.
+	groupWorkspaceIDs := map[string]string{}
+	if len(req.Entities.Groups) > 0 {
+		rows, queryErr := tx.Query(ctx, `SELECT id, workspace_id FROM groups WHERE user_id = $1`, userID)
+		if queryErr != nil {
+			respondSyncDatabaseError(c, "group parent query", userID, groupIDs, queryErr)
+			return
+		}
+		for rows.Next() {
+			var (
+				id          string
+				workspaceID *string
+			)
+			if scanErr := rows.Scan(&id, &workspaceID); scanErr != nil {
+				rows.Close()
+				respondSyncDatabaseError(c, "group parent scan", userID, groupIDs, scanErr)
+				return
+			}
+			if workspaceID != nil {
+				groupWorkspaceIDs[id] = *workspaceID
+			}
+		}
+		rows.Close()
+		if rowsErr := rows.Err(); rowsErr != nil {
+			respondSyncDatabaseError(c, "group parent iteration", userID, groupIDs, rowsErr)
 			return
 		}
 	}
@@ -245,11 +284,16 @@ func (h *SyncHandler) Push(c *gin.Context) {
 		}
 	}
 	deletedLegacyMetadataWorkspaces := entityIDSet{}
+	terminalLegacyMetadataWorkspaces := entityIDSet{}
 	if len(legacyMetadataWorkspaceIDs) > 0 {
+		// No is_deleted filter: an ordinary metadata edit from a versionless
+		// client must be rejected against a retained (1) OR purged (2) root —
+		// omitting state 2 here let a legacy client un-scrub a terminal
+		// tombstone and rewrite it as if newly created.
 		rows, queryErr := tx.Query(ctx, `
 			SELECT id, is_deleted
 			FROM workspaces
-			WHERE user_id = $1 AND is_deleted < 2
+			WHERE user_id = $1
 			ORDER BY id
 			FOR UPDATE`, userID)
 		if queryErr != nil {
@@ -266,8 +310,14 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				respondSyncDatabaseError(c, "legacy workspace metadata scan", userID, legacyMetadataWorkspaceIDs, scanErr)
 				return
 			}
-			if legacyMetadataWorkspaceIDSet.Has(id) && isDeleted == 1 {
+			if !legacyMetadataWorkspaceIDSet.Has(id) {
+				continue
+			}
+			switch isDeleted {
+			case 1:
 				deletedLegacyMetadataWorkspaces.Add(id)
+			case 2:
+				terminalLegacyMetadataWorkspaces.Add(id)
 			}
 		}
 		rows.Close()
@@ -453,11 +503,13 @@ func (h *SyncHandler) Push(c *gin.Context) {
 				unavailableWorkspaceIDs.Set(ws.ID, "parent_rejected")
 				continue
 			}
-			queueWorkspaceUpsert(ws)
-			continue
-		}
-
-		if req.ProtocolVersion != 2 {
+			if terminalLegacyMetadataWorkspaces.Has(ws.ID) {
+				rejected = append(rejected, model.Rejected{
+					ID: ws.ID, Reason: model.RejectionReasonPermanentlyDeleted, Type: "workspace",
+				})
+				unavailableWorkspaceIDs.Set(ws.ID, "parent_rejected")
+				continue
+			}
 			queueWorkspaceUpsert(ws)
 			continue
 		}
@@ -591,6 +643,22 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	// ── Collections ───────────────────────────────────────────────────────────
 	var colUpserts []model.Collection
 	for _, col := range req.Entities.Collections {
+		// classifyParentRejection below only validates the incoming target
+		// Workspace. Without an explicit check here, a Collection currently
+		// stored under a retained/purged Workspace could be "rescued" by
+		// reparenting it to an active one in the same push — check the
+		// CURRENTLY stored parent whenever the request tries to move it.
+		if currentParent, hasCurrentParent := collectionWorkspaceIDs[col.ID]; hasCurrentParent &&
+			(col.WorkspaceID == nil || currentParent != *col.WorkspaceID) {
+			if reason, unavailable := unavailableWorkspaceIDs[currentParent]; unavailable &&
+				(reason == model.RejectionReasonParentDeleted || reason == model.RejectionReasonPermanentlyDeleted) {
+				rejected = append(rejected, model.Rejected{
+					ID: col.ID, Reason: reason, Type: "collection",
+					ParentID: currentParent, ParentType: "workspace",
+				})
+				continue
+			}
+		}
 		if dependency := classifyParentRejection(
 			col.ID, "collection", col.WorkspaceID, "workspace", true,
 			ownedWorkspaceIDs, acceptedWorkspaceIDs, unavailableWorkspaceIDs,
@@ -794,6 +862,20 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	// ── Groups ────────────────────────────────────────────────────────────────
 	var groupUpserts []model.Group
 	for _, g := range req.Entities.Groups {
+		// See the analogous Collection check above: reject a reparent away
+		// from the Group's CURRENTLY stored parent when that parent is
+		// retained/purged, rather than only validating the incoming target.
+		if currentParent, hasCurrentParent := groupWorkspaceIDs[g.ID]; hasCurrentParent &&
+			(g.WorkspaceID == nil || currentParent != *g.WorkspaceID) {
+			if reason, unavailable := unavailableWorkspaceIDs[currentParent]; unavailable &&
+				(reason == model.RejectionReasonParentDeleted || reason == model.RejectionReasonPermanentlyDeleted) {
+				rejected = append(rejected, model.Rejected{
+					ID: g.ID, Reason: reason, Type: "saved_group",
+					ParentID: currentParent, ParentType: "workspace",
+				})
+				continue
+			}
+		}
 		if dependency := classifyParentRejection(
 			g.ID, "saved_group", g.WorkspaceID, "workspace", false,
 			ownedWorkspaceIDs, acceptedWorkspaceIDs, unavailableWorkspaceIDs,
@@ -908,11 +990,18 @@ func (h *SyncHandler) Pull(c *gin.Context) {
 		Capabilities: model.SyncCapabilities{WorkspaceParentTombstone: true},
 	}
 
-	// Workspaces
+	// Workspaces are always returned in full, never seq-filtered like every
+	// other entity type: the lifecycle coordinator needs an always-current
+	// view of every root's is_deleted state on every pull to reconcile
+	// pending delete/restore intents safely (a root missing from a delta
+	// because its own seq predates after_seq is indistinguishable from one
+	// that no longer exists, and the coordinator cannot tell "still active,
+	// nothing changed" from "gone"). The row count per user is small, so the
+	// cost of returning them unfiltered is negligible.
 	wsRows, err := h.db.Query(ctx,
 		`SELECT id, user_id, name, icon, color, position, seq, deleted_at, is_deleted, deletion_model, created_at, updated_at
-         FROM workspaces WHERE user_id=$1 AND seq>$2 ORDER BY seq ASC`,
-		userID, afterSeq)
+         FROM workspaces WHERE user_id=$1 ORDER BY seq ASC`,
+		userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "workspaces query failed"})
 		return
